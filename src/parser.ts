@@ -11,46 +11,84 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
     materials: {},
   };
 
-  // Find all geometry, animation, and material files
-  const globber = await glob.create(
-    `${resourcePackPath}/**/{models,animations,materials}/**/*.{json,material}`
+  // 1) Models (geometries)
+  const modelsGlob = await glob.create(
+    `${resourcePackPath}/**/models/**/*.json`
   );
-  for await (const file of globber.globGenerator()) {
+  for await (const file of modelsGlob.globGenerator()) {
     try {
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
       const relativePath = path.relative(resourcePackPath, file);
-      const pathSegments = relativePath.split(path.sep);
 
-      if (pathSegments.includes('models')) {
-        // Geometry can be in array form under 'minecraft:geometry' OR legacy keyed form
-        if (json['minecraft:geometry']) {
-          for (const geo of json['minecraft:geometry']) {
-            if (geo.description && geo.description.identifier) {
-              resourceMap.geometries[geo.description.identifier] = relativePath;
-            }
-          }
-        } else {
-          // Legacy: top-level keys like 'geometry.creeper.v1.8'
-          for (const key of Object.keys(json)) {
-            if (key.startsWith('geometry.')) {
-              resourceMap.geometries[key] = relativePath;
-            }
+      // Geometry can be array form under 'minecraft:geometry' OR legacy keyed form
+      if (json['minecraft:geometry']) {
+        for (const geo of json['minecraft:geometry']) {
+          if (geo.description && geo.description.identifier) {
+            resourceMap.geometries[geo.description.identifier] = relativePath;
           }
         }
-      } else if (pathSegments.includes('animations')) {
-        if (json.animations) {
-          for (const animIdentifier in json.animations) {
-            resourceMap.animations[animIdentifier] = relativePath;
+      } else {
+        // Legacy: top-level keys like 'geometry.creeper.v1.8'
+        for (const key of Object.keys(json)) {
+          if (key.startsWith('geometry.')) {
+            resourceMap.geometries[key] = relativePath;
           }
-        }
-      } else if (pathSegments.includes('materials')) {
-        for (const matIdentifier in json) {
-          resourceMap.materials[matIdentifier] = relativePath;
         }
       }
     } catch (error) {
-      core.warning(`Could not parse ${file}: ${error}`);
+      core.warning(`Could not parse model file ${file}: ${error}`);
+    }
+  }
+
+  // 2) Animations
+  const animationsGlob = await glob.create(
+    `${resourcePackPath}/**/animations/**/*.json`
+  );
+  for await (const file of animationsGlob.globGenerator()) {
+    try {
+      const content = await fs.readFile(file, 'utf-8');
+      const json = JSON.parse(content);
+      const relativePath = path.relative(resourcePackPath, file);
+      if (json.animations) {
+        for (const animIdentifier in json.animations) {
+          resourceMap.animations[animIdentifier] = relativePath;
+        }
+      }
+    } catch (error) {
+      core.warning(`Could not parse animation file ${file}: ${error}`);
+    }
+  }
+
+  // 3) Materials (.material and .json)
+  const materialsGlobA = await glob.create(
+    `${resourcePackPath}/**/materials/**/*.material`
+  );
+  const materialsGlobB = await glob.create(
+    `${resourcePackPath}/**/materials/**/*.json`
+  );
+  for await (const file of materialsGlobA.globGenerator()) {
+    try {
+      const content = await fs.readFile(file, 'utf-8');
+      const json = JSON.parse(content);
+      const relativePath = path.relative(resourcePackPath, file);
+      for (const matIdentifier in json) {
+        resourceMap.materials[matIdentifier] = relativePath;
+      }
+    } catch (error) {
+      core.warning(`Could not parse material file ${file}: ${error}`);
+    }
+  }
+  for await (const file of materialsGlobB.globGenerator()) {
+    try {
+      const content = await fs.readFile(file, 'utf-8');
+      const json = JSON.parse(content);
+      const relativePath = path.relative(resourcePackPath, file);
+      for (const matIdentifier in json) {
+        resourceMap.materials[matIdentifier] = relativePath;
+      }
+    } catch (error) {
+      core.warning(`Could not parse material file ${file}: ${error}`);
     }
   }
 
