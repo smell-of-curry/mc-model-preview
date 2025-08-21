@@ -20,7 +20,8 @@ async function setupBlockbench(): Promise<void> {
 
 export async function renderChanges(
   baseEntities: Entity[],
-  prEntities: Entity[]
+  prEntities: Entity[],
+  resourcePackPath: string
 ): Promise<void> {
   core.info('Starting rendering process...');
 
@@ -31,19 +32,30 @@ export async function renderChanges(
 
   // Generate "after" models
   for (const entity of prEntities) {
-    // Assuming the resource pack is at the root for now
-    const bbmodel = await createBBFile(entity, '.');
-    const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
-    await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-    core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+    try {
+      const bbmodel = await createBBFile(entity, resourcePackPath);
+      const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
+      await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+      core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+    } catch (error) {
+      core.warning(
+        `Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`
+      );
+    }
   }
 
   // Generate "before" models
   for (const entity of baseEntities) {
-    const bbmodel = await createBBFile(entity, '.');
-    const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
-    await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-    core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
+    try {
+      const bbmodel = await createBBFile(entity, resourcePackPath);
+      const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
+      await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+      core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
+    } catch (error) {
+      core.warning(
+        `Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`
+      );
+    }
   }
 
   // Render the models

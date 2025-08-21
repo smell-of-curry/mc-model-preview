@@ -54,12 +54,23 @@ export async function createBBFile(
   entity: Entity,
   resourcePackPath: string
 ): Promise<BBModel> {
+  if (!entity.geometryFiles || entity.geometryFiles.length === 0) {
+    throw new Error(
+      `No geometry files mapped for entity "${entity.identifier}"`
+    );
+  }
   // Load the first geometry file
   // Note: We are simplifying by only loading the first geometry file.
   const geoPath = path.join(resourcePackPath, entity.geometryFiles[0]);
   const geoContent = await fs.readFile(geoPath, 'utf-8');
   const geoJson = JSON.parse(geoContent);
-  const bedrockGeo = geoJson['minecraft:geometry'][0];
+  const geoArray = geoJson['minecraft:geometry'];
+  if (!Array.isArray(geoArray) || geoArray.length === 0) {
+    throw new Error(
+      `Geometry file "${entity.geometryFiles[0]}" missing minecraft:geometry array`
+    );
+  }
+  const bedrockGeo = geoArray[0];
 
   // Load and process textures
   const textures: BBTexture[] = [];

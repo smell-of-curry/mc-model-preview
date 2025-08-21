@@ -66,7 +66,11 @@ async function run(): Promise<void> {
       affectedEntityIds.includes(e.identifier)
     );
 
-    await renderChanges(affectedBaseEntities, affectedHeadEntities);
+    await renderChanges(
+      affectedBaseEntities,
+      affectedHeadEntities,
+      resourcePackPath
+    );
 
     // 3. Checkout back to head
     core.info(`Checking out head branch: ${headRef}`);

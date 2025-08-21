@@ -20,8 +20,9 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
       const relativePath = path.relative(resourcePackPath, file);
+      const pathSegments = relativePath.split(path.sep);
 
-      if (relativePath.startsWith('models')) {
+      if (pathSegments.includes('models')) {
         // Geometry can be in array form under 'minecraft:geometry' OR legacy keyed form
         if (json['minecraft:geometry']) {
           for (const geo of json['minecraft:geometry']) {
@@ -37,13 +38,13 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
             }
           }
         }
-      } else if (relativePath.startsWith('animations')) {
+      } else if (pathSegments.includes('animations')) {
         if (json.animations) {
           for (const animIdentifier in json.animations) {
             resourceMap.animations[animIdentifier] = relativePath;
           }
         }
-      } else if (relativePath.startsWith('materials')) {
+      } else if (pathSegments.includes('materials')) {
         for (const matIdentifier in json) {
           resourceMap.materials[matIdentifier] = relativePath;
         }
