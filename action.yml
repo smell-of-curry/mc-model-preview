@@ -1,0 +1,20 @@
+name: 'Minecraft Model Preview'
+description: 'Generate a preview of changed Minecraft models in a pull request.'
+author: 'Smell of Curry'
+
+inputs:
+  github-token:
+    description: 'The GitHub token to use for authentication.'
+    required: true
+  resource-pack-path:
+    description: 'The path to the resource pack in the repository.'
+    required: false
+    default: '/'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+
+branding:
+  icon: 'image'
+  color: 'green'
