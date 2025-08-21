@@ -22,24 +22,28 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
       const relativePath = path.relative(resourcePackPath, file);
 
       if (relativePath.startsWith('models')) {
-        // It's a geometry file
+        // Geometry can be in array form under 'minecraft:geometry' OR legacy keyed form
         if (json['minecraft:geometry']) {
           for (const geo of json['minecraft:geometry']) {
             if (geo.description && geo.description.identifier) {
               resourceMap.geometries[geo.description.identifier] = relativePath;
             }
           }
+        } else {
+          // Legacy: top-level keys like 'geometry.creeper.v1.8'
+          for (const key of Object.keys(json)) {
+            if (key.startsWith('geometry.')) {
+              resourceMap.geometries[key] = relativePath;
+            }
+          }
         }
       } else if (relativePath.startsWith('animations')) {
-        // It's an animation file
         if (json.animations) {
           for (const animIdentifier in json.animations) {
             resourceMap.animations[animIdentifier] = relativePath;
           }
         }
       } else if (relativePath.startsWith('materials')) {
-        // It's a material file
-        // The key in the material file is the identifier
         for (const matIdentifier in json) {
           resourceMap.materials[matIdentifier] = relativePath;
         }
@@ -79,10 +83,10 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
         geometryFiles: [],
         textureFiles: [],
         animationFiles: [],
-        materialFiles: [], // Note: Material parsing is not yet implemented
+        materialFiles: [],
       };
 
-      // Map Geometry
+      // Map Geometry (value may be 'geometry.creeper' or 'geometry.creeper.v1.8')
       if (description.geometry) {
         for (const key in description.geometry) {
           const geoIdentifier = description.geometry[key];
@@ -92,11 +96,10 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
         }
       }
 
-      // Map Textures
+      // Map Textures (paths may or may not have an extension)
       if (description.textures) {
         for (const key in description.textures) {
           const texturePath = description.textures[key];
-          // The path is relative to the RP root, extension is included
           entity.textureFiles.push(texturePath);
         }
       }

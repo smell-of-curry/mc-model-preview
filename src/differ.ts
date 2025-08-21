@@ -3,6 +3,12 @@ import * as github from '@actions/github';
 import { Entity } from './types';
 
 export async function getChangedFiles(): Promise<string[]> {
+  // If we are in a local act test, return a mock list of changed files
+  if (process.env.ACT) {
+    core.info('Act environment detected, returning mock changed files.');
+    return ['test-data/creeper_pack/models/entity/creeper.geo.json'];
+  }
+
   const token = core.getInput('github-token');
   const octokit = github.getOctokit(token);
 

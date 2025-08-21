@@ -1,0 +1,17 @@
+{
+  "pull_request": {
+    "number": 123,
+    "base": {
+      "ref": "main"
+    },
+    "head": {
+      "ref": "my-feature-branch"
+    }
+  },
+  "repository": {
+    "owner": {
+      "login": "test-owner"
+    },
+    "name": "test-repo"
+  }
+}
