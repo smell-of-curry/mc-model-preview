@@ -6,7 +6,7 @@ A github action that provides a preview of changed minecraft models in a pull re
 
 ## How it works
 
-Install the action on your repo and configure it to the path of your resource pack, default `/`.
+Install the action on your repo and configure it to the path of your resource pack, default `.` (root of the repo).
 
 When someone opens up a pull request, the action will run and check if the user created a new model or modified an existing one.
 

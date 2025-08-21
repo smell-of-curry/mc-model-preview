@@ -9,7 +9,7 @@ inputs:
   resource-pack-path:
     description: 'The path to the resource pack in the repository.'
     required: false
-    default: '/'
+    default: '.'
 
 runs:
   using: 'node20'

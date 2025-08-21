@@ -1,5 +1,6 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import * as path from 'path';
 import { parseResourcePack } from './parser';
 import { getChangedFiles, findAffectedEntities } from './differ'; // We'll need to split differ
 import { checkout } from './git';
@@ -19,7 +20,23 @@ async function run(): Promise<void> {
       return;
     }
 
-    const resourcePackPath = core.getInput('resource-pack-path');
+    const resourcePackInput = core.getInput('resource-pack-path') || '.';
+    const workspaceDir = process.env['GITHUB_WORKSPACE'] || process.cwd();
+    let resourcePackPath = path.isAbsolute(resourcePackInput)
+      ? resourcePackInput
+      : path.resolve(workspaceDir, resourcePackInput);
+
+    const normalizedWorkspace = path.resolve(workspaceDir);
+    const isInsideWorkspace =
+      resourcePackPath === normalizedWorkspace ||
+      (resourcePackPath + path.sep).startsWith(normalizedWorkspace + path.sep);
+    if (!isInsideWorkspace) {
+      core.warning(
+        `Input resource-pack-path resolved outside workspace ("${resourcePackPath}"). Falling back to workspace root ("${normalizedWorkspace}").`
+      );
+      resourcePackPath = normalizedWorkspace;
+    }
+    core.info(`Using resource pack path: ${resourcePackPath}`);
 
     // 1. Get changed files & parse head branch
     const changedFiles = await getChangedFiles();
