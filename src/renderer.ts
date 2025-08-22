@@ -11,6 +11,7 @@ import { postComment } from './comment';
 
 const BB_VERSION = '4.11.0';
 const BB_APP_IMAGE = `Blockbench_${BB_VERSION}.AppImage`;
+const BB_EXTRACTED_DIR = 'Blockbench_extracted';
 
 async function setupBlockbench(): Promise<void> {
   core.info('Setting up BlockBench...');
@@ -29,6 +30,20 @@ export async function renderChanges(
   const tempDir = path.join(process.cwd(), 'temp-render');
   await io.mkdirP(tempDir);
   core.info(`Created temporary directory for rendering at ${tempDir}`);
+
+  // Determine Blockbench executable path (AppImage or extracted AppRun fallback)
+  const appImagePath = path.join(process.cwd(), BB_APP_IMAGE);
+  const extractedAppRunPath = path.join(process.cwd(), BB_EXTRACTED_DIR, 'AppRun');
+  let bbExecutable = appImagePath;
+  try {
+    await fs.access(extractedAppRunPath);
+    bbExecutable = extractedAppRunPath;
+    // Ensure executable bit
+    try { await fs.chmod(bbExecutable, 0o755); } catch {}
+    core.info(`Using extracted Blockbench executable at ${bbExecutable}`);
+  } catch {
+    core.info(`Using AppImage at ${appImagePath}`);
+  }
 
   // Generate "after" models
   for (const entity of prEntities) {
@@ -60,7 +75,6 @@ export async function renderChanges(
 
   // Render the models
   core.info('Rendering models with BlockBench...');
-  const bbPath = path.join(process.cwd(), BB_APP_IMAGE);
   const filesToRender = await fs.readdir(tempDir);
 
   for (const file of filesToRender) {
@@ -68,7 +82,7 @@ export async function renderChanges(
       const modelPath = path.join(tempDir, file);
       const outputPath = modelPath.replace('.bbmodel', '.png');
       try {
-        await exec.exec(bbPath, [
+        await exec.exec(bbExecutable, [
           '--headless',
           `--project=${modelPath}`,
           `--export=${outputPath}`,

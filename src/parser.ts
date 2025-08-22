@@ -12,13 +12,11 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
   };
 
   // 1) Models (geometries)
-  core.info(`Parsing model files in ${resourcePackPath}/models/**/*.json`);
   const modelsGlob = await glob.create(
     `${resourcePackPath}/models/**/*.json`
   );
   for await (const file of modelsGlob.globGenerator()) {
     try {
-      core.info(`Parsing model file ${file}`);
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
       const relativePath = path.relative(resourcePackPath, file);

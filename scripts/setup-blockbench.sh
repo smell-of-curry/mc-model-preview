@@ -4,6 +4,7 @@ set -e
 # Define BlockBench version
 BB_VERSION="4.11.0"
 BB_APP_IMAGE="Blockbench_${BB_VERSION}.AppImage"
+BB_EXTRACTED_DIR="Blockbench_extracted"
 
 # Download BlockBench AppImage
 if [ ! -f "$BB_APP_IMAGE" ]; then
@@ -15,5 +16,25 @@ fi
 
 # Make it executable
 chmod +x "$BB_APP_IMAGE"
+
+# Try to ensure AppImage can run; if FUSE is missing, fall back to extraction
+echo "Verifying AppImage runtime..."
+# Attempt to install libfuse2 if possible (ignore failures)
+if command -v sudo >/dev/null 2>&1; then
+  sudo apt-get update -y >/dev/null 2>&1 || true
+  sudo apt-get install -y libfuse2 >/dev/null 2>&1 || true
+fi
+
+if ! ./$BB_APP_IMAGE --appimage-version >/dev/null 2>&1; then
+  echo "AppImage not runnable (likely missing FUSE). Extracting..."
+  ./$BB_APP_IMAGE --appimage-extract >/dev/null 2>&1
+  if [ -d "squashfs-root" ]; then
+    rm -rf "$BB_EXTRACTED_DIR" >/dev/null 2>&1 || true
+    mv squashfs-root "$BB_EXTRACTED_DIR"
+    echo "Extracted BlockBench to ./$BB_EXTRACTED_DIR"
+  else
+    echo "Failed to extract AppImage."
+  fi
+fi
 
 echo "BlockBench setup complete."
