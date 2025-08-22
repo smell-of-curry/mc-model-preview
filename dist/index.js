@@ -32576,13 +32576,28 @@ async function postComment(imageUrls) {
     }
     const token = core.getInput('github-token');
     const octokit = github.getOctokit(token);
-    await octokit.rest.issues.createComment({
-        owner: github.context.repo.owner,
-        repo: github.context.repo.repo,
-        issue_number: github.context.issue.number,
-        body,
-    });
-    core.info('PR comment posted.');
+    try {
+        await octokit.rest.issues.createComment({
+            owner: github.context.repo.owner,
+            repo: github.context.repo.repo,
+            issue_number: github.context.issue.number,
+            body,
+        });
+        core.info('PR comment posted.');
+    }
+    catch (error) {
+        core.warning(`Failed to post PR comment (likely missing permissions or forked PR). Writing to job summary instead. Error: ${error}`);
+        try {
+            await core.summary
+                .addHeading('Minecraft Model Preview')
+                .addRaw(body, true)
+                .write();
+            core.info('Wrote preview to job summary.');
+        }
+        catch (summaryError) {
+            core.warning(`Failed to write job summary: ${summaryError}`);
+        }
+    }
 }
 
 
@@ -32716,6 +32731,21 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.checkout = checkout;
 const exec = __importStar(__nccwpck_require__(5236));
 async function checkout(ref) {
+    // Try a straightforward checkout first
+    const result = await exec.getExecOutput('git', ['checkout', ref], {
+        silent: true,
+        ignoreReturnCode: true,
+    });
+    if (result.exitCode === 0)
+        return;
+    // If ambiguous (multiple remotes), prefer origin explicitly
+    // Attempt: git checkout -B <ref> --track origin/<ref>
+    let tracked = await exec.getExecOutput('git', ['checkout', '-B', ref, `--track`, `origin/${ref}`], { silent: true, ignoreReturnCode: true });
+    if (tracked.exitCode === 0)
+        return;
+    // Fallback: set default remote to origin and retry plain checkout
+    await exec.exec('git', ['config', 'checkout.defaultRemote', 'origin']);
+    await exec.exec('git', ['fetch', 'origin']);
     await exec.exec('git', ['checkout', ref]);
 }
 
@@ -33249,6 +33279,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
             try {
                 await exec.exec(bbExecutable, [
                     '--headless',
+                    '--no-sandbox',
                     `--project=${modelPath}`,
                     `--export=${outputPath}`,
                     '--render',
@@ -33264,13 +33295,17 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     const structuredUrls = prEntities.map((entity) => {
         const basePngPath = path.join(tempDir, `${entity.identifier}.base.png`);
         const headPngPath = path.join(tempDir, `${entity.identifier}.head.png`);
+        const baseUrl = publicUrls[basePngPath] || '';
+        const headUrl = publicUrls[headPngPath] || '';
         return {
             identifier: entity.identifier,
-            base: publicUrls[basePngPath] || '',
-            head: publicUrls[headPngPath] || '',
+            base: baseUrl,
+            head: headUrl,
         };
     });
-    await (0, comment_1.postComment)(structuredUrls);
+    // Filter out rows where both images are missing to avoid empty <img src="">
+    const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
+    await (0, comment_1.postComment)(nonEmptyRows);
     core.info('Rendering process complete.');
 }
 

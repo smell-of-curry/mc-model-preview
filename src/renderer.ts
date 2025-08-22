@@ -84,6 +84,7 @@ export async function renderChanges(
       try {
         await exec.exec(bbExecutable, [
           '--headless',
+          '--no-sandbox',
           `--project=${modelPath}`,
           `--export=${outputPath}`,
           '--render',
@@ -107,14 +108,22 @@ export async function renderChanges(
       `${entity.identifier}.head.png`
     );
 
+    const baseUrl = publicUrls[basePngPath] || '';
+    const headUrl = publicUrls[headPngPath] || '';
+
     return {
       identifier: entity.identifier,
-      base: publicUrls[basePngPath] || '',
-      head: publicUrls[headPngPath] || '',
+      base: baseUrl,
+      head: headUrl,
     };
   });
 
-  await postComment(structuredUrls);
+  // Filter out rows where both images are missing to avoid empty <img src="">
+  const nonEmptyRows = structuredUrls.filter(
+    (u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0)
+  );
+
+  await postComment(nonEmptyRows);
 
   core.info('Rendering process complete.');
 }

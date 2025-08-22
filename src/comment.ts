@@ -21,12 +21,26 @@ export async function postComment(
   const token = core.getInput('github-token');
   const octokit = github.getOctokit(token);
 
-  await octokit.rest.issues.createComment({
-    owner: github.context.repo.owner,
-    repo: github.context.repo.repo,
-    issue_number: github.context.issue.number,
-    body,
-  });
-
-  core.info('PR comment posted.');
+  try {
+    await octokit.rest.issues.createComment({
+      owner: github.context.repo.owner,
+      repo: github.context.repo.repo,
+      issue_number: github.context.issue.number,
+      body,
+    });
+    core.info('PR comment posted.');
+  } catch (error) {
+    core.warning(
+      `Failed to post PR comment (likely missing permissions or forked PR). Writing to job summary instead. Error: ${error}`
+    );
+    try {
+      await core.summary
+        .addHeading('Minecraft Model Preview')
+        .addRaw(body, true)
+        .write();
+      core.info('Wrote preview to job summary.');
+    } catch (summaryError) {
+      core.warning(`Failed to write job summary: ${summaryError}`);
+    }
+  }
 }
