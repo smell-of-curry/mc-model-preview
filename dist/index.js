@@ -32571,6 +32571,9 @@ async function postComment(imageUrls) {
     let body = `### Minecraft Model Preview\n\n`;
     body += `| Entity | Before | After |\n`;
     body += `|--------|--------|-------|\n`;
+    if (imageUrls.length === 0) {
+        body += `| _No renderable changes detected or images missing_ |  |  |\n`;
+    }
     for (const urlSet of imageUrls) {
         body += `| \`${urlSet.identifier}\` | <img src="${urlSet.base}" width="200" /> | <img src="${urlSet.head}" width="200" /> |\n`;
     }
@@ -33284,6 +33287,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
             const variant = variantMatch ? variantMatch[1] : 'render';
             const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
             const outputPath = path.join(tempDir, safeBaseName);
+            core.info(`About to render: modelPath=${modelPath} -> outputPath=${outputPath}`);
             try {
                 // Run under xvfb if available to satisfy Electron's display requirements
                 // Precompute if xvfb-run exists
@@ -33377,7 +33381,14 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
             }
         }
     }
+    // List files in temp dir for debugging
+    try {
+        const listAfter = await fs.readdir(tempDir);
+        core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+    }
+    catch { }
     const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
+    core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
     const structuredUrls = prEntities.map((entity) => {
         const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
         const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
@@ -33386,6 +33397,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
         const safeHead = path.join(tempDir, `${safeId}.head.png`);
         const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
         const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+        core.info(`URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
         return {
             identifier: entity.identifier,
             base: baseUrl,

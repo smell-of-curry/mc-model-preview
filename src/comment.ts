@@ -14,6 +14,10 @@ export async function postComment(
   body += `| Entity | Before | After |\n`;
   body += `|--------|--------|-------|\n`;
 
+  if (imageUrls.length === 0) {
+    body += `| _No renderable changes detected or images missing_ |  |  |\n`;
+  }
+
   for (const urlSet of imageUrls) {
     body += `| \`${urlSet.identifier}\` | <img src="${urlSet.base}" width="200" /> | <img src="${urlSet.head}" width="200" /> |\n`;
   }

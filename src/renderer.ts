@@ -89,6 +89,7 @@ export async function renderChanges(
       const variant = variantMatch ? variantMatch[1] : 'render';
       const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
       const outputPath = path.join(tempDir, safeBaseName);
+      core.info(`About to render: modelPath=${modelPath} -> outputPath=${outputPath}`);
       try {
         // Run under xvfb if available to satisfy Electron's display requirements
         // Precompute if xvfb-run exists
@@ -182,7 +183,14 @@ export async function renderChanges(
     }
   }
 
+  // List files in temp dir for debugging
+  try {
+    const listAfter = await fs.readdir(tempDir);
+    core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+  } catch {}
+
   const publicUrls = await uploadImages(tempDir, github.context.issue.number);
+  core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
 
   const structuredUrls = prEntities.map((entity) => {
     const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
@@ -193,6 +201,9 @@ export async function renderChanges(
 
     const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
     const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+    core.info(
+      `URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`
+    );
 
     return {
       identifier: entity.identifier,
