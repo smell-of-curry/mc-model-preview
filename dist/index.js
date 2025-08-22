@@ -33228,21 +33228,21 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     const tempDir = path.join(process.cwd(), 'temp-render');
     await io.mkdirP(tempDir);
     core.info(`Created temporary directory for rendering at ${tempDir}`);
-    // Determine Blockbench executable path (AppImage or extracted AppRun fallback)
+    // Determine Blockbench executable path (prefer extracted AppRun)
     const appImagePath = path.join(process.cwd(), BB_APP_IMAGE);
     const extractedAppRunPath = path.join(process.cwd(), BB_EXTRACTED_DIR, 'AppRun');
-    let bbExecutable = appImagePath;
+    let bbExecutable = extractedAppRunPath;
     try {
         await fs.access(extractedAppRunPath);
-        bbExecutable = extractedAppRunPath;
         // Ensure executable bit
         try {
-            await fs.chmod(bbExecutable, 0o755);
+            await fs.chmod(extractedAppRunPath, 0o755);
         }
         catch { }
-        core.info(`Using extracted Blockbench executable at ${bbExecutable}`);
+        core.info(`Using extracted Blockbench executable at ${extractedAppRunPath}`);
     }
     catch {
+        bbExecutable = appImagePath;
         core.info(`Using AppImage at ${appImagePath}`);
     }
     // Generate "after" models
@@ -33277,13 +33277,25 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
             const modelPath = path.join(tempDir, file);
             const outputPath = modelPath.replace('.bbmodel', '.png');
             try {
-                await exec.exec(bbExecutable, [
+                // Run under xvfb if available to satisfy Electron's display requirements
+                const runner = 'xvfb-run';
+                const args = [
+                    '--auto-servernum', '--server-args=-screen 0 1280x720x24',
+                    bbExecutable,
                     '--headless',
                     '--no-sandbox',
                     `--project=${modelPath}`,
                     `--export=${outputPath}`,
                     '--render',
-                ]);
+                ];
+                // Try xvfb-run first, fall back to direct exec if xvfb-run is missing
+                const tryXvfb = await exec.getExecOutput('which', ['xvfb-run'], { ignoreReturnCode: true });
+                if (tryXvfb.exitCode === 0) {
+                    await exec.exec(runner, args);
+                }
+                else {
+                    await exec.exec(bbExecutable, args.slice(2));
+                }
                 core.info(`Rendered ${file} to ${outputPath}`);
             }
             catch (error) {

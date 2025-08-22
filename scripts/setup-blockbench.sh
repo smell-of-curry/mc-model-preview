@@ -19,21 +19,20 @@ chmod +x "$BB_APP_IMAGE"
 
 # Try to ensure AppImage can run; if FUSE is missing, fall back to extraction
 echo "Verifying AppImage runtime..."
-# Attempt to install libfuse2 if possible (ignore failures)
+# Attempt to install libfuse2 and xvfb if possible (ignore failures)
 if command -v sudo >/dev/null 2>&1; then
   sudo apt-get update -y >/dev/null 2>&1 || true
-  sudo apt-get install -y libfuse2 >/dev/null 2>&1 || true
+  sudo apt-get install -y libfuse2 xvfb >/dev/null 2>&1 || true
 fi
 
-if ! ./$BB_APP_IMAGE --appimage-version >/dev/null 2>&1; then
-  echo "AppImage not runnable (likely missing FUSE). Extracting..."
-  ./$BB_APP_IMAGE --appimage-extract >/dev/null 2>&1
+# Extract AppImage unconditionally to avoid setuid sandbox issues and prefer AppRun
+if [ ! -d "$BB_EXTRACTED_DIR" ]; then
+  echo "Extracting BlockBench AppImage..."
+  ./$BB_APP_IMAGE --appimage-extract >/dev/null 2>&1 || true
   if [ -d "squashfs-root" ]; then
     rm -rf "$BB_EXTRACTED_DIR" >/dev/null 2>&1 || true
     mv squashfs-root "$BB_EXTRACTED_DIR"
     echo "Extracted BlockBench to ./$BB_EXTRACTED_DIR"
-  else
-    echo "Failed to extract AppImage."
   fi
 fi
 
