@@ -33223,6 +33223,9 @@ async function setupBlockbench() {
     await exec.exec('bash', [scriptPath]);
 }
 async function renderChanges(baseEntities, prEntities, resourcePackPath) {
+    const toSafeFilename = (name) => {
+        return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    };
     core.info('Starting rendering process...');
     await setupBlockbench();
     const tempDir = path.join(process.cwd(), 'temp-render');
@@ -33276,7 +33279,11 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     for (const file of filesToRender) {
         if (file.endsWith('.bbmodel')) {
             const modelPath = path.join(tempDir, file);
-            const outputPath = modelPath.replace('.bbmodel', '.png');
+            const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
+            const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
+            const variant = variantMatch ? variantMatch[1] : 'render';
+            const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
+            const outputPath = path.join(tempDir, safeBaseName);
             try {
                 // Run under xvfb if available to satisfy Electron's display requirements
                 // Precompute if xvfb-run exists
@@ -33372,10 +33379,13 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     }
     const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
     const structuredUrls = prEntities.map((entity) => {
-        const basePngPath = path.join(tempDir, `${entity.identifier}.base.png`);
-        const headPngPath = path.join(tempDir, `${entity.identifier}.head.png`);
-        const baseUrl = publicUrls[basePngPath] || '';
-        const headUrl = publicUrls[headPngPath] || '';
+        const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
+        const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
+        const safeId = toSafeFilename(entity.identifier);
+        const safeBase = path.join(tempDir, `${safeId}.base.png`);
+        const safeHead = path.join(tempDir, `${safeId}.head.png`);
+        const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
+        const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
         return {
             identifier: entity.identifier,
             base: baseUrl,

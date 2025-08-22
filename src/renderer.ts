@@ -24,6 +24,9 @@ export async function renderChanges(
   prEntities: Entity[],
   resourcePackPath: string
 ): Promise<void> {
+  const toSafeFilename = (name: string): string => {
+    return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  };
   core.info('Starting rendering process...');
 
   await setupBlockbench();
@@ -81,7 +84,11 @@ export async function renderChanges(
   for (const file of filesToRender) {
     if (file.endsWith('.bbmodel')) {
       const modelPath = path.join(tempDir, file);
-      const outputPath = modelPath.replace('.bbmodel', '.png');
+      const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
+      const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
+      const variant = variantMatch ? variantMatch[1] : 'render';
+      const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
+      const outputPath = path.join(tempDir, safeBaseName);
       try {
         // Run under xvfb if available to satisfy Electron's display requirements
         // Precompute if xvfb-run exists
@@ -178,17 +185,14 @@ export async function renderChanges(
   const publicUrls = await uploadImages(tempDir, github.context.issue.number);
 
   const structuredUrls = prEntities.map((entity) => {
-    const basePngPath = path.join(
-      tempDir,
-      `${entity.identifier}.base.png`
-    );
-    const headPngPath = path.join(
-      tempDir,
-      `${entity.identifier}.head.png`
-    );
+    const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
+    const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
+    const safeId = toSafeFilename(entity.identifier);
+    const safeBase = path.join(tempDir, `${safeId}.base.png`);
+    const safeHead = path.join(tempDir, `${safeId}.head.png`);
 
-    const baseUrl = publicUrls[basePngPath] || '';
-    const headUrl = publicUrls[headPngPath] || '';
+    const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
+    const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
 
     return {
       identifier: entity.identifier,
