@@ -12,11 +12,13 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
   };
 
   // 1) Models (geometries)
+  core.info(`Parsing model files in ${resourcePackPath}/models/**/*.json`);
   const modelsGlob = await glob.create(
-    `${resourcePackPath}/**/models/**/*.json`
+    `${resourcePackPath}/models/**/*.json`
   );
   for await (const file of modelsGlob.globGenerator()) {
     try {
+      core.info(`Parsing model file ${file}`);
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
       const relativePath = path.relative(resourcePackPath, file);
@@ -43,7 +45,7 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
 
   // 2) Animations
   const animationsGlob = await glob.create(
-    `${resourcePackPath}/**/animations/**/*.json`
+    `${resourcePackPath}/animations/**/*.json`
   );
   for await (const file of animationsGlob.globGenerator()) {
     try {
@@ -62,10 +64,10 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
 
   // 3) Materials (.material and .json)
   const materialsGlobA = await glob.create(
-    `${resourcePackPath}/**/materials/**/*.material`
+    `${resourcePackPath}/materials/**/*.material`
   );
   const materialsGlobB = await glob.create(
-    `${resourcePackPath}/**/materials/**/*.json`
+    `${resourcePackPath}/materials/**/*.json`
   );
   for await (const file of materialsGlobA.globGenerator()) {
     try {

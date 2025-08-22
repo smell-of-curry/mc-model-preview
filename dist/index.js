@@ -32453,12 +32453,19 @@ const fs = __importStar(__nccwpck_require__(1943));
 const path = __importStar(__nccwpck_require__(6928));
 const uuid_1 = __nccwpck_require__(1914);
 async function createBBFile(entity, resourcePackPath) {
+    if (!entity.geometryFiles || entity.geometryFiles.length === 0) {
+        throw new Error(`No geometry files mapped for entity "${entity.identifier}"`);
+    }
     // Load the first geometry file
     // Note: We are simplifying by only loading the first geometry file.
     const geoPath = path.join(resourcePackPath, entity.geometryFiles[0]);
     const geoContent = await fs.readFile(geoPath, 'utf-8');
     const geoJson = JSON.parse(geoContent);
-    const bedrockGeo = geoJson['minecraft:geometry'][0];
+    const geoArray = geoJson['minecraft:geometry'];
+    if (!Array.isArray(geoArray) || geoArray.length === 0) {
+        throw new Error(`Geometry file "${entity.geometryFiles[0]}" missing minecraft:geometry array`);
+    }
+    const bedrockGeo = geoArray[0];
     // Load and process textures
     const textures = [];
     for (const textureFile of entity.textureFiles) {
@@ -32851,6 +32858,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
+const path = __importStar(__nccwpck_require__(6928));
 const parser_1 = __nccwpck_require__(7196);
 const differ_1 = __nccwpck_require__(8907); // We'll need to split differ
 const git_1 = __nccwpck_require__(1243);
@@ -32864,7 +32872,19 @@ async function run() {
             core.setFailed('Could not get base and head refs from pull request context.');
             return;
         }
-        const resourcePackPath = core.getInput('resource-pack-path');
+        const resourcePackInput = core.getInput('resource-pack-path') || '.';
+        const workspaceDir = process.env['GITHUB_WORKSPACE'] || process.cwd();
+        let resourcePackPath = path.isAbsolute(resourcePackInput)
+            ? resourcePackInput
+            : path.resolve(workspaceDir, resourcePackInput);
+        const normalizedWorkspace = path.resolve(workspaceDir);
+        const isInsideWorkspace = resourcePackPath === normalizedWorkspace ||
+            (resourcePackPath + path.sep).startsWith(normalizedWorkspace + path.sep);
+        if (!isInsideWorkspace) {
+            core.warning(`Input resource-pack-path resolved outside workspace ("${resourcePackPath}"). Falling back to workspace root ("${normalizedWorkspace}").`);
+            resourcePackPath = normalizedWorkspace;
+        }
+        core.info(`Using resource pack path: ${resourcePackPath}`);
         // 1. Get changed files & parse head branch
         const changedFiles = await (0, differ_1.getChangedFiles)();
         const headEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
@@ -32883,7 +32903,7 @@ async function run() {
         // Filter base entities to only include those affected in the PR
         const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
         const affectedBaseEntities = baseEntities.filter((e) => affectedEntityIds.includes(e.identifier));
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities);
+        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath);
         // 3. Checkout back to head
         core.info(`Checking out head branch: ${headRef}`);
         await (0, git_1.checkout)(headRef);
@@ -32950,46 +32970,80 @@ async function buildResourceMap(resourcePackPath) {
         animations: {},
         materials: {},
     };
-    // Find all geometry, animation, and material files
-    const globber = await glob.create(`${resourcePackPath}/**/{models,animations,materials}/**/*.{json,material}`);
-    for await (const file of globber.globGenerator()) {
+    // 1) Models (geometries)
+    core.info(`Parsing model files in ${resourcePackPath}/models/**/*.json`);
+    const modelsGlob = await glob.create(`${resourcePackPath}/models/**/*.json`);
+    for await (const file of modelsGlob.globGenerator()) {
         try {
+            core.info(`Parsing model file ${file}`);
             const content = await fs.readFile(file, 'utf-8');
             const json = JSON.parse(content);
             const relativePath = path.relative(resourcePackPath, file);
-            if (relativePath.startsWith('models')) {
-                // Geometry can be in array form under 'minecraft:geometry' OR legacy keyed form
-                if (json['minecraft:geometry']) {
-                    for (const geo of json['minecraft:geometry']) {
-                        if (geo.description && geo.description.identifier) {
-                            resourceMap.geometries[geo.description.identifier] = relativePath;
-                        }
-                    }
-                }
-                else {
-                    // Legacy: top-level keys like 'geometry.creeper.v1.8'
-                    for (const key of Object.keys(json)) {
-                        if (key.startsWith('geometry.')) {
-                            resourceMap.geometries[key] = relativePath;
-                        }
+            // Geometry can be array form under 'minecraft:geometry' OR legacy keyed form
+            if (json['minecraft:geometry']) {
+                for (const geo of json['minecraft:geometry']) {
+                    if (geo.description && geo.description.identifier) {
+                        resourceMap.geometries[geo.description.identifier] = relativePath;
                     }
                 }
             }
-            else if (relativePath.startsWith('animations')) {
-                if (json.animations) {
-                    for (const animIdentifier in json.animations) {
-                        resourceMap.animations[animIdentifier] = relativePath;
+            else {
+                // Legacy: top-level keys like 'geometry.creeper.v1.8'
+                for (const key of Object.keys(json)) {
+                    if (key.startsWith('geometry.')) {
+                        resourceMap.geometries[key] = relativePath;
                     }
-                }
-            }
-            else if (relativePath.startsWith('materials')) {
-                for (const matIdentifier in json) {
-                    resourceMap.materials[matIdentifier] = relativePath;
                 }
             }
         }
         catch (error) {
-            core.warning(`Could not parse ${file}: ${error}`);
+            core.warning(`Could not parse model file ${file}: ${error}`);
+        }
+    }
+    // 2) Animations
+    const animationsGlob = await glob.create(`${resourcePackPath}/animations/**/*.json`);
+    for await (const file of animationsGlob.globGenerator()) {
+        try {
+            const content = await fs.readFile(file, 'utf-8');
+            const json = JSON.parse(content);
+            const relativePath = path.relative(resourcePackPath, file);
+            if (json.animations) {
+                for (const animIdentifier in json.animations) {
+                    resourceMap.animations[animIdentifier] = relativePath;
+                }
+            }
+        }
+        catch (error) {
+            core.warning(`Could not parse animation file ${file}: ${error}`);
+        }
+    }
+    // 3) Materials (.material and .json)
+    const materialsGlobA = await glob.create(`${resourcePackPath}/materials/**/*.material`);
+    const materialsGlobB = await glob.create(`${resourcePackPath}/materials/**/*.json`);
+    for await (const file of materialsGlobA.globGenerator()) {
+        try {
+            const content = await fs.readFile(file, 'utf-8');
+            const json = JSON.parse(content);
+            const relativePath = path.relative(resourcePackPath, file);
+            for (const matIdentifier in json) {
+                resourceMap.materials[matIdentifier] = relativePath;
+            }
+        }
+        catch (error) {
+            core.warning(`Could not parse material file ${file}: ${error}`);
+        }
+    }
+    for await (const file of materialsGlobB.globGenerator()) {
+        try {
+            const content = await fs.readFile(file, 'utf-8');
+            const json = JSON.parse(content);
+            const relativePath = path.relative(resourcePackPath, file);
+            for (const matIdentifier in json) {
+                resourceMap.materials[matIdentifier] = relativePath;
+            }
+        }
+        catch (error) {
+            core.warning(`Could not parse material file ${file}: ${error}`);
         }
     }
     return resourceMap;
@@ -33122,7 +33176,7 @@ async function setupBlockbench() {
     const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
     await exec.exec('bash', [scriptPath]);
 }
-async function renderChanges(baseEntities, prEntities) {
+async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     core.info('Starting rendering process...');
     await setupBlockbench();
     const tempDir = path.join(process.cwd(), 'temp-render');
@@ -33130,18 +33184,27 @@ async function renderChanges(baseEntities, prEntities) {
     core.info(`Created temporary directory for rendering at ${tempDir}`);
     // Generate "after" models
     for (const entity of prEntities) {
-        // Assuming the resource pack is at the root for now
-        const bbmodel = await (0, blockbench_1.createBBFile)(entity, '.');
-        const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
-        await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-        core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+        try {
+            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+            const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
+            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+            core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+        }
+        catch (error) {
+            core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
+        }
     }
     // Generate "before" models
     for (const entity of baseEntities) {
-        const bbmodel = await (0, blockbench_1.createBBFile)(entity, '.');
-        const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
-        await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-        core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
+        try {
+            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+            const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
+            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+            core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
+        }
+        catch (error) {
+            core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
+        }
     }
     // Render the models
     core.info('Rendering models with BlockBench...');

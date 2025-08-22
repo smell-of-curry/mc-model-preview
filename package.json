@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "ncc build src/main.ts -o dist",
+    "dev": "ncc build src/main.ts -o dist --watch",
     "test": "jest"
   },
   "keywords": [],
