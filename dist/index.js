@@ -32848,11 +32848,14 @@ async function uploadImages(imageDir, prNumber) {
     await exec.exec('cp', ['-r', `${imageDir}/.`, prFolder]);
     // Only stage the PR folder
     await exec.exec('git', ['add', prFolder]);
+    // For debugging, list what we're about to commit
+    await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git ls-files -s ${prFolder} | cat`]);
     await exec.exec('git', ['commit', '-m', commitMsg]);
     await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
     const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
     const imageUrls = {};
     const files = await exec.getExecOutput('ls', [imageDir]);
+    core.info(`Uploader saw files in ${imageDir}: ${files.stdout}`);
     for (const file of files.stdout.split('\n')) {
         if (file.endsWith('.png')) {
             const localPath = path.join(imageDir, file);
@@ -33374,7 +33377,41 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
                         ran = true;
                     }
                 }
-                core.info(`Rendered ${file} to ${outputPath}`);
+                // Verify output exists; if not, attempt recovery from extracted dir
+                let exists = false;
+                try {
+                    await fs.stat(outputPath);
+                    exists = true;
+                }
+                catch { }
+                if (!exists) {
+                    const candidate = path.join(extractedDir, safeBaseName);
+                    try {
+                        await fs.stat(candidate);
+                        // Move to expected location
+                        try {
+                            await fs.rename(candidate, outputPath);
+                        }
+                        catch {
+                            // cross-device fallback: copy then unlink
+                            const data = await fs.readFile(candidate);
+                            await fs.writeFile(outputPath, data);
+                            try {
+                                await fs.unlink(candidate);
+                            }
+                            catch { }
+                        }
+                        exists = true;
+                        core.info(`Recovered output from extracted dir: ${candidate} -> ${outputPath}`);
+                    }
+                    catch { }
+                }
+                if (exists) {
+                    core.info(`Rendered ${file} to ${outputPath}`);
+                }
+                else {
+                    core.warning(`Render reported success but output not found: ${outputPath}`);
+                }
             }
             catch (error) {
                 core.warning(`Failed to render ${file}: ${error}`);

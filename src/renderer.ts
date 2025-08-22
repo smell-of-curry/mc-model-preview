@@ -176,7 +176,34 @@ export async function renderChanges(
             ran = true;
           }
         }
-        core.info(`Rendered ${file} to ${outputPath}`);
+        // Verify output exists; if not, attempt recovery from extracted dir
+        let exists = false;
+        try {
+          await fs.stat(outputPath);
+          exists = true;
+        } catch {}
+        if (!exists) {
+          const candidate = path.join(extractedDir, safeBaseName);
+          try {
+            await fs.stat(candidate);
+            // Move to expected location
+            try {
+              await fs.rename(candidate, outputPath);
+            } catch {
+              // cross-device fallback: copy then unlink
+              const data = await fs.readFile(candidate);
+              await fs.writeFile(outputPath, data);
+              try { await fs.unlink(candidate); } catch {}
+            }
+            exists = true;
+            core.info(`Recovered output from extracted dir: ${candidate} -> ${outputPath}`);
+          } catch {}
+        }
+        if (exists) {
+          core.info(`Rendered ${file} to ${outputPath}`);
+        } else {
+          core.warning(`Render reported success but output not found: ${outputPath}`);
+        }
       } catch (error) {
         core.warning(`Failed to render ${file}: ${error}`);
       }

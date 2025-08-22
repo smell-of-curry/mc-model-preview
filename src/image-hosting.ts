@@ -56,6 +56,8 @@ export async function uploadImages(
 
   // Only stage the PR folder
   await exec.exec('git', ['add', prFolder]);
+  // For debugging, list what we're about to commit
+  await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git ls-files -s ${prFolder} | cat`]);
   await exec.exec('git', ['commit', '-m', commitMsg]);
   await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
 
@@ -63,6 +65,7 @@ export async function uploadImages(
   
   const imageUrls: Record<string, string> = {};
   const files = await exec.getExecOutput('ls', [imageDir]);
+  core.info(`Uploader saw files in ${imageDir}: ${files.stdout}`);
 
   for (const file of files.stdout.split('\n')) {
     if (file.endsWith('.png')) {
