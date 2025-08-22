@@ -87,17 +87,21 @@ export async function renderChanges(
         // Precompute if xvfb-run exists
         const tryXvfb = await exec.getExecOutput('which', ['xvfb-run'], { ignoreReturnCode: true });
 
-        // Build common Blockbench args
+        // Build common Blockbench args with extra Electron flags to reduce hangs
         const bbArgs = [
           '--headless',
           '--no-sandbox',
+          '--disable-gpu',
+          '--disable-software-rasterizer',
+          '--disable-dev-shm-usage',
+          '--disable-features=VizDisplayCompositor',
           `--project=${modelPath}`,
           `--export=${outputPath}`,
           '--render',
         ];
 
         // If using extracted AppRun, set APPDIR and cwd to extracted root
-        const env = { ...process.env, APPDIR: extractedDir };
+        const env = { ...process.env, APPDIR: extractedDir, APPIMAGE: appImagePath };
         const options = { cwd: extractedDir, env } as any;
 
         // Try in this order:
@@ -106,16 +110,45 @@ export async function renderChanges(
         // 3) xvfb-run + AppImage --appimage-extract-and-run
         // 4) AppImage --appimage-extract-and-run directly
         let ran = false;
+        const killAfterMs = 120000; // 2 minutes per render
+        let timeoutHandle: NodeJS.Timeout | undefined;
+        async function execWithTimeout(cmd: string, args: string[], opts?: any) {
+          return await new Promise<void>((resolve, reject) => {
+            let finished = false;
+            timeoutHandle = setTimeout(() => {
+              if (!finished) {
+                finished = true;
+                reject(new Error(`Timeout after ${killAfterMs}ms running ${cmd}`));
+              }
+            }, killAfterMs);
+            exec.exec(cmd, args, opts)
+              .then(() => {
+                if (!finished) {
+                  finished = true;
+                  if (timeoutHandle) clearTimeout(timeoutHandle);
+                  resolve();
+                }
+              })
+              .catch((e) => {
+                if (!finished) {
+                  finished = true;
+                  if (timeoutHandle) clearTimeout(timeoutHandle);
+                  reject(e);
+                }
+              });
+          });
+        }
+
         if (bbExecutable === extractedAppRunPath) {
           if (tryXvfb.exitCode === 0) {
             try {
-              await exec.exec('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', extractedAppRunPath, ...bbArgs], options);
+              await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', extractedAppRunPath, ...bbArgs], options);
               ran = true;
             } catch {}
           }
           if (!ran) {
             try {
-              await exec.exec(extractedAppRunPath, bbArgs, options);
+              await execWithTimeout(extractedAppRunPath, bbArgs, options);
               ran = true;
             } catch {}
           }
@@ -126,12 +159,12 @@ export async function renderChanges(
           const appImageArgs = ['--appimage-extract-and-run', ...bbArgs];
           if (tryXvfb.exitCode === 0) {
             try {
-              await exec.exec('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs]);
+              await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs]);
               ran = true;
             } catch {}
           }
           if (!ran) {
-            await exec.exec(appImagePath, appImageArgs);
+            await execWithTimeout(appImagePath, appImageArgs);
             ran = true;
           }
         }
