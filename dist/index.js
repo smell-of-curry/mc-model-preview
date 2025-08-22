@@ -32854,14 +32854,16 @@ async function uploadImages(imageDir, prNumber) {
     await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
     const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
     const imageUrls = {};
-    const files = await exec.getExecOutput('ls', [imageDir]);
-    core.info(`Uploader saw files in ${imageDir}: ${files.stdout}`);
-    for (const file of files.stdout.split('\n')) {
-        if (file.endsWith('.png')) {
-            const localPath = path.join(imageDir, file);
-            const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${file}`;
-            imageUrls[localPath] = publicUrl;
-        }
+    // Recursively discover PNGs to support nested outputs
+    const found = await exec.getExecOutput('bash', [
+        '-lc',
+        `set -o pipefail; find '${imageDir}' -type f -name '*.png' -printf '%p\n' | sort | cat`,
+    ]);
+    core.info(`Uploader discovered PNGs under ${imageDir}:\n${found.stdout}`);
+    for (const absPath of found.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const relPath = path.relative(imageDir, absPath).replace(/\\/g, '/');
+        const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${relPath}`;
+        imageUrls[absPath] = publicUrl;
     }
     core.info('Image upload complete.');
     return imageUrls;
@@ -33422,6 +33424,12 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
     try {
         const listAfter = await fs.readdir(tempDir);
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+        // Also list extracted dir to see if outputs landed there
+        try {
+            const listExtracted = await fs.readdir(extractedDir);
+            core.info(`Extracted dir contents: ${JSON.stringify(listExtracted)}`);
+        }
+        catch { }
     }
     catch { }
     const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);

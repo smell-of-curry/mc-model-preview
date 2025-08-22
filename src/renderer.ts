@@ -214,6 +214,11 @@ export async function renderChanges(
   try {
     const listAfter = await fs.readdir(tempDir);
     core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+    // Also list extracted dir to see if outputs landed there
+    try {
+      const listExtracted = await fs.readdir(extractedDir);
+      core.info(`Extracted dir contents: ${JSON.stringify(listExtracted)}`);
+    } catch {}
   } catch {}
 
   const publicUrls = await uploadImages(tempDir, github.context.issue.number);

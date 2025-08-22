@@ -64,15 +64,17 @@ export async function uploadImages(
   const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
   
   const imageUrls: Record<string, string> = {};
-  const files = await exec.getExecOutput('ls', [imageDir]);
-  core.info(`Uploader saw files in ${imageDir}: ${files.stdout}`);
+  // Recursively discover PNGs to support nested outputs
+  const found = await exec.getExecOutput('bash', [
+    '-lc',
+    `set -o pipefail; find '${imageDir}' -type f -name '*.png' -printf '%p\n' | sort | cat`,
+  ]);
+  core.info(`Uploader discovered PNGs under ${imageDir}:\n${found.stdout}`);
 
-  for (const file of files.stdout.split('\n')) {
-    if (file.endsWith('.png')) {
-      const localPath = path.join(imageDir, file);
-      const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${file}`;
-      imageUrls[localPath] = publicUrl;
-    }
+  for (const absPath of found.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    const relPath = path.relative(imageDir, absPath).replace(/\\/g, '/');
+    const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${relPath}`;
+    imageUrls[absPath] = publicUrl;
   }
 
   core.info('Image upload complete.');
