@@ -6,6 +6,7 @@ export async function postComment(
     base: string;
     head: string;
     identifier: string;
+    isNew?: boolean;
   }[]
 ): Promise<void> {
   core.info('Generating PR comment...');
@@ -19,7 +20,14 @@ export async function postComment(
   }
 
   for (const urlSet of imageUrls) {
-    body += `| \`${urlSet.identifier}\` | <img src="${urlSet.base}" width="200" /> | <img src="${urlSet.head}" width="200" /> |\n`;
+    // For new models, show "New" instead of a before image
+    const beforeCell = urlSet.isNew || !urlSet.base
+      ? '_New model_'
+      : `<img src="${urlSet.base}" width="200" />`;
+    const afterCell = urlSet.head
+      ? `<img src="${urlSet.head}" width="200" />`
+      : '_Missing_';
+    body += `| \`${urlSet.identifier}\` | ${beforeCell} | ${afterCell} |\n`;
   }
 
   const token = core.getInput('github-token');

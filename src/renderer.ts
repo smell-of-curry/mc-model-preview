@@ -181,6 +181,9 @@ export async function renderChanges(
     const publicUrls = await uploadImages(tempDir, github.context.issue.number);
     core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
     
+    // Track which entities are new (not present on base branch)
+    const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
+    
     const structuredUrls = prEntities.map((entity) => {
       const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
       const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
@@ -190,14 +193,17 @@ export async function renderChanges(
       
       const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
       const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+      const isNew = !baseEntityIds.has(entity.identifier);
+      
       core.info(
-        `URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`
+        `URL mapping for ${entity.identifier}: isNew=${isNew}, base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`
       );
       
       return {
         identifier: entity.identifier,
         base: baseUrl,
         head: headUrl,
+        isNew,
       };
     });
     

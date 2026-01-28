@@ -73628,7 +73628,14 @@ async function postComment(imageUrls) {
         body += `| _No renderable changes detected or images missing_ |  |  |\n`;
     }
     for (const urlSet of imageUrls) {
-        body += `| \`${urlSet.identifier}\` | <img src="${urlSet.base}" width="200" /> | <img src="${urlSet.head}" width="200" /> |\n`;
+        // For new models, show "New" instead of a before image
+        const beforeCell = urlSet.isNew || !urlSet.base
+            ? '_New model_'
+            : `<img src="${urlSet.base}" width="200" />`;
+        const afterCell = urlSet.head
+            ? `<img src="${urlSet.head}" width="200" />`
+            : '_Missing_';
+        body += `| \`${urlSet.identifier}\` | ${beforeCell} | ${afterCell} |\n`;
     }
     const token = core.getInput('github-token');
     const octokit = github.getOctokit(token);
@@ -74458,6 +74465,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
         const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
         core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
+        // Track which entities are new (not present on base branch)
+        const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
         const structuredUrls = prEntities.map((entity) => {
             const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
             const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
@@ -74466,11 +74475,13 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             const safeHead = path.join(tempDir, `${safeId}.head.png`);
             const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
             const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
-            core.info(`URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
+            const isNew = !baseEntityIds.has(entity.identifier);
+            core.info(`URL mapping for ${entity.identifier}: isNew=${isNew}, base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
             return {
                 identifier: entity.identifier,
                 base: baseUrl,
                 head: headUrl,
+                isNew,
             };
         });
         // Filter out rows where both images are missing
@@ -74535,32 +74546,112 @@ exports.renderBBModelWithThreeJS = renderBBModelWithThreeJS;
 exports.renderGeometryWithThreeJS = renderGeometryWithThreeJS;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(91943));
-// The Three.js rendering code that runs in the browser
+const path = __importStar(__nccwpck_require__(16928));
+// The Three.js rendering code that runs in the browser - with texture support
 const THREEJS_RENDER_SCRIPT = `
-// Helper to create a cube mesh from Bedrock cube data
-function createCube(cube, textureWidth, textureHeight, boneColor) {
+// Create UV coordinates for a face
+function createFaceUVs(uv, uvSize, textureWidth, textureHeight) {
+  // Convert from pixel coordinates to normalized UV (0-1)
+  const u0 = uv[0] / textureWidth;
+  const v0 = 1 - (uv[1] / textureHeight); // Flip V because Three.js uses bottom-left origin
+  const u1 = (uv[0] + uvSize[0]) / textureWidth;
+  const v1 = 1 - ((uv[1] + uvSize[1]) / textureHeight);
+  
+  return [
+    new THREE.Vector2(u0, v0),
+    new THREE.Vector2(u1, v0),
+    new THREE.Vector2(u0, v1),
+    new THREE.Vector2(u1, v1),
+  ];
+}
+
+// Create a textured cube mesh from Bedrock cube data
+function createTexturedCube(cube, textureWidth, textureHeight, texture, fallbackColor) {
   const origin = cube.origin || [0, 0, 0];
   const size = cube.size || [1, 1, 1];
   const inflate = cube.inflate || 0;
   
-  // Create geometry with inflated size
-  const geometry = new THREE.BoxGeometry(
-    size[0] + inflate * 2,
-    size[1] + inflate * 2,
-    size[2] + inflate * 2
-  );
+  const w = size[0] + inflate * 2;
+  const h = size[1] + inflate * 2;
+  const d = size[2] + inflate * 2;
   
-  // Create material with a color based on bone
-  const material = new THREE.MeshStandardMaterial({
-    color: boneColor,
-    roughness: 0.8,
-    metalness: 0.1,
-  });
+  // Determine UV mode
+  const uv = cube.uv;
+  const isPerFaceUV = uv && typeof uv === 'object' && !Array.isArray(uv);
+  const isBoxUV = uv && Array.isArray(uv);
   
+  let material;
+  
+  if (texture && (isPerFaceUV || isBoxUV)) {
+    // Create materials for each face with proper UV mapping
+    const materials = [];
+    
+    if (isPerFaceUV) {
+      // Per-face UV mapping
+      const faces = ['east', 'west', 'up', 'down', 'south', 'north'];
+      const faceOrder = [0, 1, 2, 3, 4, 5]; // Three.js face order: +X, -X, +Y, -Y, +Z, -Z
+      
+      for (let i = 0; i < 6; i++) {
+        const faceName = faces[i];
+        const faceUV = uv[faceName];
+        
+        if (faceUV && faceUV.uv && faceUV.uv_size) {
+          // Clone texture and set UV offset/repeat
+          const mat = new THREE.MeshStandardMaterial({
+            map: texture.clone(),
+            transparent: true,
+            alphaTest: 0.1,
+            side: THREE.DoubleSide,
+          });
+          
+          // Calculate UV offset and repeat
+          const u = faceUV.uv[0] / textureWidth;
+          const v = 1 - (faceUV.uv[1] + Math.abs(faceUV.uv_size[1])) / textureHeight;
+          const repeatU = Math.abs(faceUV.uv_size[0]) / textureWidth;
+          const repeatV = Math.abs(faceUV.uv_size[1]) / textureHeight;
+          
+          mat.map.offset.set(u, v);
+          mat.map.repeat.set(repeatU, repeatV);
+          mat.map.needsUpdate = true;
+          
+          materials.push(mat);
+        } else {
+          // No UV for this face, use fallback
+          materials.push(new THREE.MeshStandardMaterial({ 
+            color: fallbackColor,
+            transparent: true,
+          }));
+        }
+      }
+      
+      material = materials;
+    } else if (isBoxUV) {
+      // Box UV mapping (legacy format)
+      const uvX = uv[0];
+      const uvY = uv[1];
+      
+      // Simplified box UV - just use the texture with calculated offsets
+      const mat = new THREE.MeshStandardMaterial({
+        map: texture,
+        transparent: true,
+        alphaTest: 0.1,
+        side: THREE.DoubleSide,
+      });
+      material = mat;
+    }
+  } else {
+    // No texture or no UV, use fallback color
+    material = new THREE.MeshStandardMaterial({
+      color: fallbackColor,
+      roughness: 0.8,
+      metalness: 0.1,
+    });
+  }
+  
+  const geometry = new THREE.BoxGeometry(w, h, d);
   const mesh = new THREE.Mesh(geometry, material);
   
   // Position: Bedrock uses origin as the corner, Three.js uses center
-  // Also need to account for inflate
   mesh.position.set(
     origin[0] + size[0] / 2,
     origin[1] + size[1] / 2,
@@ -74570,20 +74661,14 @@ function createCube(cube, textureWidth, textureHeight, boneColor) {
   // Handle rotation if present
   if (cube.rotation && cube.pivot) {
     const pivot = cube.pivot;
-    // Create a group to handle pivot rotation
     const group = new THREE.Group();
     group.position.set(pivot[0], pivot[1], pivot[2]);
-    
-    // Offset the mesh by the negative pivot
     mesh.position.sub(new THREE.Vector3(pivot[0], pivot[1], pivot[2]));
-    
-    // Apply rotation (convert to radians)
     group.rotation.set(
       THREE.MathUtils.degToRad(cube.rotation[0] || 0),
       THREE.MathUtils.degToRad(cube.rotation[1] || 0),
       THREE.MathUtils.degToRad(cube.rotation[2] || 0)
     );
-    
     group.add(mesh);
     return group;
   }
@@ -74592,26 +74677,23 @@ function createCube(cube, textureWidth, textureHeight, boneColor) {
 }
 
 // Create a bone group with all its cubes
-function createBone(bone, textureWidth, textureHeight, colorIndex) {
+function createBone(bone, textureWidth, textureHeight, texture, colorIndex) {
   const group = new THREE.Group();
   group.name = bone.name;
   
-  // Generate a color based on index for visual distinction
   const colors = [
     0x4a90d9, 0x7cb342, 0xffa726, 0xab47bc, 
     0x26a69a, 0xef5350, 0x5c6bc0, 0x66bb6a
   ];
   const boneColor = colors[colorIndex % colors.length];
   
-  // Add cubes
   if (bone.cubes) {
     for (const cube of bone.cubes) {
-      const cubeMesh = createCube(cube, textureWidth, textureHeight, boneColor);
+      const cubeMesh = createTexturedCube(cube, textureWidth, textureHeight, texture, boneColor);
       group.add(cubeMesh);
     }
   }
   
-  // Set bone pivot and rotation
   if (bone.pivot) {
     group.position.set(bone.pivot[0], bone.pivot[1], bone.pivot[2]);
   }
@@ -74628,10 +74710,10 @@ function createBone(bone, textureWidth, textureHeight, colorIndex) {
 }
 
 // Main render function
-function renderModel(geometry) {
+async function renderModel(geometry, textureDataUrl) {
   const description = geometry.description || {};
-  const textureWidth = description.texture_width || 16;
-  const textureHeight = description.texture_height || 16;
+  const textureWidth = description.texture_width || 64;
+  const textureHeight = description.texture_height || 64;
   const bones = geometry.bones || [];
   
   // Create scene
@@ -74652,26 +74734,47 @@ function renderModel(geometry) {
   renderer.setPixelRatio(1);
   
   // Add lights
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
   scene.add(ambientLight);
   
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
   directionalLight.position.set(50, 100, 50);
   scene.add(directionalLight);
   
-  const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+  const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
   directionalLight2.position.set(-50, 50, -50);
   scene.add(directionalLight2);
   
+  // Load texture if provided
+  let texture = null;
+  if (textureDataUrl) {
+    const textureLoader = new THREE.TextureLoader();
+    texture = await new Promise((resolve, reject) => {
+      textureLoader.load(
+        textureDataUrl,
+        (tex) => {
+          tex.magFilter = THREE.NearestFilter;
+          tex.minFilter = THREE.NearestFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          resolve(tex);
+        },
+        undefined,
+        (err) => {
+          console.warn('Failed to load texture:', err);
+          resolve(null);
+        }
+      );
+    });
+  }
+  
   // Create model group
   const modelGroup = new THREE.Group();
-  
-  // Build bone hierarchy
   const boneGroups = new Map();
   
   // First pass: create all bone groups
   bones.forEach((bone, index) => {
-    const boneGroup = createBone(bone, textureWidth, textureHeight, index);
+    const boneGroup = createBone(bone, textureWidth, textureHeight, texture, index);
     boneGroups.set(bone.name, boneGroup);
   });
   
@@ -74680,7 +74783,6 @@ function renderModel(geometry) {
     const boneGroup = boneGroups.get(bone.name);
     if (bone.parent && boneGroups.has(bone.parent)) {
       const parentGroup = boneGroups.get(bone.parent);
-      // Adjust position relative to parent
       if (bone.pivot) {
         const parentBone = bones.find(b => b.name === bone.parent);
         if (parentBone && parentBone.pivot) {
@@ -74717,7 +74819,6 @@ function renderModel(geometry) {
   // Render
   renderer.render(scene, camera);
   
-  // Return canvas data URL
   return canvas.toDataURL('image/png');
 }
 `;
@@ -74740,10 +74841,11 @@ function getRendererHTML() {
     ${THREEJS_RENDER_SCRIPT}
     
     // This will be called from puppeteer
-    window.renderBedrockModel = function(geometryJson) {
+    window.renderBedrockModel = async function(geometryJson, textureDataUrl) {
       try {
         const geometry = JSON.parse(geometryJson);
-        return { success: true, dataUrl: renderModel(geometry) };
+        const dataUrl = await renderModel(geometry, textureDataUrl);
+        return { success: true, dataUrl };
       } catch (e) {
         return { success: false, error: e.message || String(e) };
       }
@@ -74754,6 +74856,21 @@ function getRendererHTML() {
   </script>
 </body>
 </html>`;
+}
+/**
+ * Load a texture file and convert to data URL
+ */
+async function loadTextureAsDataURL(texturePath) {
+    try {
+        const buffer = await fs.readFile(texturePath);
+        const ext = path.extname(texturePath).toLowerCase();
+        const mimeType = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+        return `data:${mimeType};base64,${buffer.toString('base64')}`;
+    }
+    catch (e) {
+        core.warning(`Failed to load texture ${texturePath}: ${e}`);
+        return null;
+    }
 }
 /**
  * Render a Bedrock geometry model using Three.js
@@ -74771,6 +74888,8 @@ async function renderModelWithThreeJS(geometryPath, texturePath, outputPath, bro
             return false;
         }
         const geometry = geometries[0];
+        // Load texture if provided
+        const textureDataUrl = texturePath ? await loadTextureAsDataURL(texturePath) : null;
         // Create page
         page = await browser.newPage();
         await page.setViewport({ width: 800, height: 600 });
@@ -74780,9 +74899,9 @@ async function renderModelWithThreeJS(geometryPath, texturePath, outputPath, bro
         await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
         core.info('Three.js renderer ready');
         // Call the render function
-        const result = await page.evaluate((geoJson) => {
-            return window.renderBedrockModel(geoJson);
-        }, JSON.stringify(geometry));
+        const result = await page.evaluate(async (geoJson, textureUrl) => {
+            return await window.renderBedrockModel(geoJson, textureUrl);
+        }, JSON.stringify(geometry), textureDataUrl);
         if (!result.success) {
             core.warning(`Three.js render failed: ${result.error}`);
             return false;
@@ -74820,11 +74939,19 @@ async function renderBBModelWithThreeJS(bbmodelPath, outputPath, browser) {
         const geometry = {
             description: {
                 identifier: bbmodel.name || 'model',
-                texture_width: bbmodel.resolution?.width || 16,
-                texture_height: bbmodel.resolution?.height || 16,
+                texture_width: bbmodel.resolution?.width || 64,
+                texture_height: bbmodel.resolution?.height || 64,
             },
             bones: bbmodel.elements || [],
         };
+        // Load texture from BBModel if available
+        let textureDataUrl = null;
+        if (bbmodel.textures && bbmodel.textures.length > 0) {
+            const firstTexture = bbmodel.textures[0];
+            if (firstTexture.path) {
+                textureDataUrl = await loadTextureAsDataURL(firstTexture.path);
+            }
+        }
         // Create page
         page = await browser.newPage();
         await page.setViewport({ width: 800, height: 600 });
@@ -74834,9 +74961,9 @@ async function renderBBModelWithThreeJS(bbmodelPath, outputPath, browser) {
         await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
         core.info('Three.js renderer ready');
         // Call the render function
-        const result = await page.evaluate((geoJson) => {
-            return window.renderBedrockModel(geoJson);
-        }, JSON.stringify(geometry));
+        const result = await page.evaluate(async (geoJson, textureUrl) => {
+            return await window.renderBedrockModel(geoJson, textureUrl);
+        }, JSON.stringify(geometry), textureDataUrl);
         if (!result.success) {
             core.warning(`Three.js render failed: ${result.error}`);
             return false;
@@ -74864,9 +74991,11 @@ async function renderBBModelWithThreeJS(bbmodelPath, outputPath, browser) {
  * Render directly from a Bedrock geometry object
  * This is the preferred method as it skips the BBModel intermediate format
  */
-async function renderGeometryWithThreeJS(geometry, outputPath, browser) {
+async function renderGeometryWithThreeJS(geometry, texturePath, outputPath, browser) {
     let page = null;
     try {
+        // Load texture if provided
+        const textureDataUrl = texturePath ? await loadTextureAsDataURL(texturePath) : null;
         // Create page
         page = await browser.newPage();
         await page.setViewport({ width: 800, height: 600 });
@@ -74875,9 +75004,9 @@ async function renderGeometryWithThreeJS(geometry, outputPath, browser) {
         // Wait for Three.js and our script to load
         await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
         // Call the render function
-        const result = await page.evaluate((geoJson) => {
-            return window.renderBedrockModel(geoJson);
-        }, JSON.stringify(geometry));
+        const result = await page.evaluate(async (geoJson, textureUrl) => {
+            return await window.renderBedrockModel(geoJson, textureUrl);
+        }, JSON.stringify(geometry), textureDataUrl);
         if (!result.success) {
             core.warning(`Three.js render failed: ${result.error}`);
             return false;
