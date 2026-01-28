@@ -199,7 +199,3 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
   core.info(`Successfully parsed ${entities.length} entities.`);
   return entities;
 }
-
-async function temp() {
-  core.info('temp');
-}

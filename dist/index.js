@@ -73763,11 +73763,6 @@ exports.findAffectedEntities = findAffectedEntities;
 const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
 async function getChangedFiles() {
-    // If we are in a local act test, return a mock list of changed files
-    if (process.env.ACT) {
-        core.info('Act environment detected, returning mock changed files.');
-        return ['test-data/creeper_pack/models/entity/creeper.geo.json'];
-    }
     const token = core.getInput('github-token');
     const octokit = github.getOctokit(token);
     const { owner, repo } = github.context.repo;
@@ -74319,9 +74314,6 @@ async function parseResourcePack(resourcePackPath) {
     }
     core.info(`Successfully parsed ${entities.length} entities.`);
     return entities;
-}
-async function temp() {
-    core.info('temp');
 }
 
 

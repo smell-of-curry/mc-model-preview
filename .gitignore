@@ -1,7 +1,7 @@
 # Dependencies
-/node_modules
+node_modules/
 
-# Build output
+# Build output (dist is committed for GitHub Actions)
 # /dist
 
 # Logs
@@ -13,8 +13,12 @@ lerna-debug.log*
 # Misc
 .DS_Store
 .env
+
+# Test artifacts
 /coverage
-debug-screenshot.png
-test-render.png
-ferroseed-render.png
-ferroseed-textured.png
+
+# Temporary render files
+temp-render/
+*.bbmodel
+*-render.png
+*-screenshot.png
