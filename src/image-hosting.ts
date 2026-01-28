@@ -52,10 +52,10 @@ async function uploadImagesAsArtifact(
     core.info(`Saved metadata to ${metadataPath}`);
   }
   
-  // Find all image files and metadata
+  // Find all image files and metadata (exclude .bbmodel - they contain colons which are invalid for artifacts)
   const found = await exec.getExecOutput('bash', [
     '-lc',
-    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name '*.bbmodel' -o -name 'metadata.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
+    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'metadata.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
   ]);
   
   const files = found.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
