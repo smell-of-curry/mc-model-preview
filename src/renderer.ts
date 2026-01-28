@@ -5,7 +5,7 @@ import * as io from '@actions/io';
 import * as fs from 'fs/promises';
 import * as github from '@actions/github';
 import { Entity } from './types';
-import { createBBFile } from './blockbench';
+import { createBBFile, hasShinyTexture, TextureVariant } from './blockbench';
 import { uploadImages } from './image-hosting';
 import { postComment } from './comment';
 import { checkout } from './git';
@@ -121,8 +121,9 @@ export async function renderChanges(
     // Generate "before" models (already on base branch from main.ts)
     core.info(`Generating base models (on ${baseRef})...`);
     for (const entity of baseEntities) {
+      // Generate normal variant
       try {
-        const bbmodel = await createBBFile(entity, resourcePackPath);
+        const bbmodel = await createBBFile(entity, resourcePackPath, 'normal');
         const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
         await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
         core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
@@ -131,14 +132,29 @@ export async function renderChanges(
           `Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`
         );
       }
+      
+      // Generate shiny variant if available
+      if (hasShinyTexture(entity)) {
+        try {
+          const bbmodel = await createBBFile(entity, resourcePackPath, 'shiny');
+          const modelPath = path.join(tempDir, `${entity.identifier}.base.shiny.bbmodel`);
+          await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+          core.info(`Generated base shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+        } catch (error) {
+          core.warning(
+            `Skipping ${entity.identifier} (base shiny) due to error creating bbmodel: ${error}`
+          );
+        }
+      }
     }
     
     // Generate "after" models (checkout back to original HEAD SHA)
     core.info(`Checking out HEAD (${headSha}) to generate head models...`);
     await checkout(headSha);
     for (const entity of prEntities) {
+      // Generate normal variant
       try {
-        const bbmodel = await createBBFile(entity, resourcePackPath);
+        const bbmodel = await createBBFile(entity, resourcePackPath, 'normal');
         const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
         await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
         core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
@@ -146,6 +162,20 @@ export async function renderChanges(
         core.warning(
           `Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`
         );
+      }
+      
+      // Generate shiny variant if available
+      if (hasShinyTexture(entity)) {
+        try {
+          const bbmodel = await createBBFile(entity, resourcePackPath, 'shiny');
+          const modelPath = path.join(tempDir, `${entity.identifier}.head.shiny.bbmodel`);
+          await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+          core.info(`Generated head shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+        } catch (error) {
+          core.warning(
+            `Skipping ${entity.identifier} (head shiny) due to error creating bbmodel: ${error}`
+          );
+        }
       }
     }
     
@@ -156,10 +186,15 @@ export async function renderChanges(
     for (const file of filesToRender) {
       if (file.endsWith('.bbmodel')) {
         const modelPath = path.join(tempDir, file);
-        const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
-        const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
-        const variant = variantMatch ? variantMatch[1] : 'render';
-        const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
+        // Handle both normal and shiny patterns:
+        // - entity.identifier.base.bbmodel -> entity.identifier.base.png
+        // - entity.identifier.base.shiny.bbmodel -> entity.identifier.base.shiny.png
+        const identifierPart = file.replace(/\.(head|base)(\.shiny)?\.bbmodel$/, '');
+        const variantMatch = file.match(/\.(head|base)(\.shiny)?\.bbmodel$/);
+        const branchVariant = variantMatch ? variantMatch[1] : 'render';
+        const isShiny = variantMatch && variantMatch[2] === '.shiny';
+        const shinySuffix = isShiny ? '.shiny' : '';
+        const safeBaseName = `${toSafeFilename(identifierPart)}.${branchVariant}${shinySuffix}.png`;
         const outputPath = path.join(tempDir, safeBaseName);
         
         core.info(`Rendering: ${modelPath} -> ${outputPath}`);
@@ -185,29 +220,47 @@ export async function renderChanges(
     const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
     
     const structuredUrls = prEntities.map((entity) => {
+      const safeId = toSafeFilename(entity.identifier);
+      
+      // Normal variant URLs
       const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
       const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
-      const safeId = toSafeFilename(entity.identifier);
       const safeBase = path.join(tempDir, `${safeId}.base.png`);
       const safeHead = path.join(tempDir, `${safeId}.head.png`);
       
       const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
       const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+      
+      // Shiny variant URLs
+      const originalBaseShiny = path.join(tempDir, `${entity.identifier}.base.shiny.png`);
+      const originalHeadShiny = path.join(tempDir, `${entity.identifier}.head.shiny.png`);
+      const safeBaseShiny = path.join(tempDir, `${safeId}.base.shiny.png`);
+      const safeHeadShiny = path.join(tempDir, `${safeId}.head.shiny.png`);
+      
+      const baseShinyUrl = publicUrls[originalBaseShiny] || publicUrls[safeBaseShiny] || '';
+      const headShinyUrl = publicUrls[originalHeadShiny] || publicUrls[safeHeadShiny] || '';
+      
       const isNew = !baseEntityIds.has(entity.identifier);
+      const entityHasShiny = hasShinyTexture(entity);
       
       core.info(
-        `URL mapping for ${entity.identifier}: isNew=${isNew}, base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`
+        `URL mapping for ${entity.identifier}: isNew=${isNew}, hasShiny=${entityHasShiny}, ` +
+        `base => ${baseUrl || '[missing]'}, head => ${headUrl || '[missing]'}, ` +
+        `baseShiny => ${baseShinyUrl || '[missing]'}, headShiny => ${headShinyUrl || '[missing]'}`
       );
       
       return {
         identifier: entity.identifier,
         base: baseUrl,
         head: headUrl,
+        baseShiny: baseShinyUrl,
+        headShiny: headShinyUrl,
         isNew,
+        hasShiny: entityHasShiny,
       };
     });
     
-    // Filter out rows where both images are missing
+    // Filter out rows where both normal images are missing
     const nonEmptyRows = structuredUrls.filter(
       (u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0)
     );

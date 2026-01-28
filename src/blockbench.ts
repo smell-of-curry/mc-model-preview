@@ -50,9 +50,44 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
+export type TextureVariant = 'normal' | 'shiny';
+
+/**
+ * Check if an entity has a shiny texture variant available
+ */
+export function hasShinyTexture(entity: Entity): boolean {
+  return Object.keys(entity.textureMap).some(key => key.startsWith('shiny_'));
+}
+
+/**
+ * Get the best texture key for the given variant
+ */
+function getTextureKeyForVariant(textureMap: Record<string, string>, variant: TextureVariant): string | null {
+  const keys = Object.keys(textureMap);
+  
+  if (variant === 'shiny') {
+    // For shiny, look for keys starting with "shiny_"
+    // Priority: shiny_default > shiny_male_default > any shiny_*
+    if (keys.includes('shiny_default')) return 'shiny_default';
+    const shinyMaleDefault = keys.find(k => k === 'shiny_male_default');
+    if (shinyMaleDefault) return shinyMaleDefault;
+    const anyShiny = keys.find(k => k.startsWith('shiny_'));
+    return anyShiny || null;
+  }
+  
+  // For normal, look for non-shiny keys
+  // Priority: default > male_default > any non-shiny key
+  if (keys.includes('default')) return 'default';
+  const maleDefault = keys.find(k => k === 'male_default');
+  if (maleDefault) return maleDefault;
+  const anyNonShiny = keys.find(k => !k.startsWith('shiny_') && k !== 'evo_aura');
+  return anyNonShiny || null;
+}
+
 export async function createBBFile(
   entity: Entity,
-  resourcePackPath: string
+  resourcePackPath: string,
+  variant: TextureVariant = 'normal'
 ): Promise<BBModel> {
   if (!entity.geometryFiles || entity.geometryFiles.length === 0) {
     throw new Error(
@@ -81,47 +116,14 @@ export async function createBBFile(
   }
   const bedrockGeo = geoArray[0];
 
-  // Load and process textures
-  // Prefer the "default" texture, then textures with proper paths
+  // Load and process textures based on variant
   const textures: BBTexture[] = [];
   
-  // Build prioritized texture list
-  const textureEntries: Array<{ key: string; path: string }> = [];
+  // Get the best texture key for the requested variant
+  const textureKey = getTextureKeyForVariant(entity.textureMap, variant);
   
-  // First priority: "default" texture
-  if (entity.textureMap['default']) {
-    textureEntries.push({ key: 'default', path: entity.textureMap['default'] });
-  }
-  
-  // Second priority: textures with "default" in the key name
-  for (const [key, texPath] of Object.entries(entity.textureMap)) {
-    if (key !== 'default' && key.includes('default')) {
-      textureEntries.push({ key, path: texPath });
-    }
-  }
-  
-  // Third priority: other textures sorted by quality
-  const otherTextures = Object.entries(entity.textureMap)
-    .filter(([key]) => key !== 'default' && !key.includes('default'))
-    .sort(([, a], [, b]) => {
-      // Prefer textures with .png extension
-      const aHasExt = a.endsWith('.png') || a.endsWith('.jpg');
-      const bHasExt = b.endsWith('.png') || b.endsWith('.jpg');
-      if (aHasExt && !bHasExt) return -1;
-      if (!aHasExt && bHasExt) return 1;
-      // Prefer textures in entity/pokemon folder
-      const aIsPokemon = a.includes('entity/pokemon');
-      const bIsPokemon = b.includes('entity/pokemon');
-      if (aIsPokemon && !bIsPokemon) return -1;
-      if (!aIsPokemon && bIsPokemon) return 1;
-      return 0;
-    });
-  
-  for (const [key, texPath] of otherTextures) {
-    textureEntries.push({ key, path: texPath });
-  }
-  
-  for (const { key, path: textureFile } of textureEntries) {
+  if (textureKey && entity.textureMap[textureKey]) {
+    const textureFile = entity.textureMap[textureKey];
     let txPath = path.join(resourcePackPath, textureFile);
     
     // If path doesn't have extension, try adding .png
@@ -134,7 +136,7 @@ export async function createBBFile(
       name: path.basename(textureFile),
       folder: '',
       namespace: '',
-      id: key,
+      id: textureKey,
       particle: false,
       render_mode: 'normal',
       frame_time: 1,

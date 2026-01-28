@@ -1,14 +1,17 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 
-export async function postComment(
-  imageUrls: {
-    base: string;
-    head: string;
-    identifier: string;
-    isNew?: boolean;
-  }[]
-): Promise<void> {
+export interface ImageUrlSet {
+  base: string;
+  head: string;
+  baseShiny?: string;
+  headShiny?: string;
+  identifier: string;
+  isNew?: boolean;
+  hasShiny?: boolean;
+}
+
+export async function postComment(imageUrls: ImageUrlSet[]): Promise<void> {
   core.info('Generating PR comment...');
 
   let body = `### Minecraft Model Preview\n\n`;
@@ -28,6 +31,17 @@ export async function postComment(
       ? `<img src="${urlSet.head}" width="200" />`
       : '_Missing_';
     body += `| \`${urlSet.identifier}\` | ${beforeCell} | ${afterCell} |\n`;
+    
+    // Add shiny row if the entity has a shiny texture
+    if (urlSet.hasShiny && (urlSet.baseShiny || urlSet.headShiny)) {
+      const beforeShinyCell = urlSet.isNew || !urlSet.baseShiny
+        ? '_New model_'
+        : `<img src="${urlSet.baseShiny}" width="200" />`;
+      const afterShinyCell = urlSet.headShiny
+        ? `<img src="${urlSet.headShiny}" width="200" />`
+        : '_Missing_';
+      body += `| \`${urlSet.identifier}\` (shiny) | ${beforeShinyCell} | ${afterShinyCell} |\n`;
+    }
   }
 
   const token = core.getInput('github-token');

@@ -73496,11 +73496,44 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.hasShinyTexture = hasShinyTexture;
 exports.createBBFile = createBBFile;
 const fs = __importStar(__nccwpck_require__(91943));
 const path = __importStar(__nccwpck_require__(16928));
 const uuid_1 = __nccwpck_require__(31914);
-async function createBBFile(entity, resourcePackPath) {
+/**
+ * Check if an entity has a shiny texture variant available
+ */
+function hasShinyTexture(entity) {
+    return Object.keys(entity.textureMap).some(key => key.startsWith('shiny_'));
+}
+/**
+ * Get the best texture key for the given variant
+ */
+function getTextureKeyForVariant(textureMap, variant) {
+    const keys = Object.keys(textureMap);
+    if (variant === 'shiny') {
+        // For shiny, look for keys starting with "shiny_"
+        // Priority: shiny_default > shiny_male_default > any shiny_*
+        if (keys.includes('shiny_default'))
+            return 'shiny_default';
+        const shinyMaleDefault = keys.find(k => k === 'shiny_male_default');
+        if (shinyMaleDefault)
+            return shinyMaleDefault;
+        const anyShiny = keys.find(k => k.startsWith('shiny_'));
+        return anyShiny || null;
+    }
+    // For normal, look for non-shiny keys
+    // Priority: default > male_default > any non-shiny key
+    if (keys.includes('default'))
+        return 'default';
+    const maleDefault = keys.find(k => k === 'male_default');
+    if (maleDefault)
+        return maleDefault;
+    const anyNonShiny = keys.find(k => !k.startsWith('shiny_') && k !== 'evo_aura');
+    return anyNonShiny || null;
+}
+async function createBBFile(entity, resourcePackPath, variant = 'normal') {
     if (!entity.geometryFiles || entity.geometryFiles.length === 0) {
         throw new Error(`No geometry files mapped for entity "${entity.identifier}". ` +
             `This usually means the geometry was not found in the resource map.`);
@@ -73519,45 +73552,12 @@ async function createBBFile(entity, resourcePackPath) {
         throw new Error(`Geometry file "${entity.geometryFiles[0]}" missing minecraft:geometry array`);
     }
     const bedrockGeo = geoArray[0];
-    // Load and process textures
-    // Prefer the "default" texture, then textures with proper paths
+    // Load and process textures based on variant
     const textures = [];
-    // Build prioritized texture list
-    const textureEntries = [];
-    // First priority: "default" texture
-    if (entity.textureMap['default']) {
-        textureEntries.push({ key: 'default', path: entity.textureMap['default'] });
-    }
-    // Second priority: textures with "default" in the key name
-    for (const [key, texPath] of Object.entries(entity.textureMap)) {
-        if (key !== 'default' && key.includes('default')) {
-            textureEntries.push({ key, path: texPath });
-        }
-    }
-    // Third priority: other textures sorted by quality
-    const otherTextures = Object.entries(entity.textureMap)
-        .filter(([key]) => key !== 'default' && !key.includes('default'))
-        .sort(([, a], [, b]) => {
-        // Prefer textures with .png extension
-        const aHasExt = a.endsWith('.png') || a.endsWith('.jpg');
-        const bHasExt = b.endsWith('.png') || b.endsWith('.jpg');
-        if (aHasExt && !bHasExt)
-            return -1;
-        if (!aHasExt && bHasExt)
-            return 1;
-        // Prefer textures in entity/pokemon folder
-        const aIsPokemon = a.includes('entity/pokemon');
-        const bIsPokemon = b.includes('entity/pokemon');
-        if (aIsPokemon && !bIsPokemon)
-            return -1;
-        if (!aIsPokemon && bIsPokemon)
-            return 1;
-        return 0;
-    });
-    for (const [key, texPath] of otherTextures) {
-        textureEntries.push({ key, path: texPath });
-    }
-    for (const { key, path: textureFile } of textureEntries) {
+    // Get the best texture key for the requested variant
+    const textureKey = getTextureKeyForVariant(entity.textureMap, variant);
+    if (textureKey && entity.textureMap[textureKey]) {
+        const textureFile = entity.textureMap[textureKey];
         let txPath = path.join(resourcePackPath, textureFile);
         // If path doesn't have extension, try adding .png
         if (!textureFile.endsWith('.png') && !textureFile.endsWith('.jpg')) {
@@ -73568,7 +73568,7 @@ async function createBBFile(entity, resourcePackPath) {
             name: path.basename(textureFile),
             folder: '',
             namespace: '',
-            id: key,
+            id: textureKey,
             particle: false,
             render_mode: 'normal',
             frame_time: 1,
@@ -73679,6 +73679,16 @@ async function postComment(imageUrls) {
             ? `<img src="${urlSet.head}" width="200" />`
             : '_Missing_';
         body += `| \`${urlSet.identifier}\` | ${beforeCell} | ${afterCell} |\n`;
+        // Add shiny row if the entity has a shiny texture
+        if (urlSet.hasShiny && (urlSet.baseShiny || urlSet.headShiny)) {
+            const beforeShinyCell = urlSet.isNew || !urlSet.baseShiny
+                ? '_New model_'
+                : `<img src="${urlSet.baseShiny}" width="200" />`;
+            const afterShinyCell = urlSet.headShiny
+                ? `<img src="${urlSet.headShiny}" width="200" />`
+                : '_Missing_';
+            body += `| \`${urlSet.identifier}\` (shiny) | ${beforeShinyCell} | ${afterShinyCell} |\n`;
+        }
     }
     const token = core.getInput('github-token');
     const octokit = github.getOctokit(token);
@@ -74460,8 +74470,9 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         // Generate "before" models (already on base branch from main.ts)
         core.info(`Generating base models (on ${baseRef})...`);
         for (const entity of baseEntities) {
+            // Generate normal variant
             try {
-                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'normal');
                 const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
                 await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
                 core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
@@ -74469,19 +74480,44 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             catch (error) {
                 core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
             }
+            // Generate shiny variant if available
+            if ((0, blockbench_1.hasShinyTexture)(entity)) {
+                try {
+                    const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'shiny');
+                    const modelPath = path.join(tempDir, `${entity.identifier}.base.shiny.bbmodel`);
+                    await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+                    core.info(`Generated base shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+                }
+                catch (error) {
+                    core.warning(`Skipping ${entity.identifier} (base shiny) due to error creating bbmodel: ${error}`);
+                }
+            }
         }
         // Generate "after" models (checkout back to original HEAD SHA)
         core.info(`Checking out HEAD (${headSha}) to generate head models...`);
         await (0, git_1.checkout)(headSha);
         for (const entity of prEntities) {
+            // Generate normal variant
             try {
-                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'normal');
                 const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
                 await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
                 core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
             }
             catch (error) {
                 core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
+            }
+            // Generate shiny variant if available
+            if ((0, blockbench_1.hasShinyTexture)(entity)) {
+                try {
+                    const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'shiny');
+                    const modelPath = path.join(tempDir, `${entity.identifier}.head.shiny.bbmodel`);
+                    await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+                    core.info(`Generated head shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+                }
+                catch (error) {
+                    core.warning(`Skipping ${entity.identifier} (head shiny) due to error creating bbmodel: ${error}`);
+                }
             }
         }
         // Render the models using Three.js
@@ -74490,10 +74526,15 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         for (const file of filesToRender) {
             if (file.endsWith('.bbmodel')) {
                 const modelPath = path.join(tempDir, file);
-                const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
-                const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
-                const variant = variantMatch ? variantMatch[1] : 'render';
-                const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
+                // Handle both normal and shiny patterns:
+                // - entity.identifier.base.bbmodel -> entity.identifier.base.png
+                // - entity.identifier.base.shiny.bbmodel -> entity.identifier.base.shiny.png
+                const identifierPart = file.replace(/\.(head|base)(\.shiny)?\.bbmodel$/, '');
+                const variantMatch = file.match(/\.(head|base)(\.shiny)?\.bbmodel$/);
+                const branchVariant = variantMatch ? variantMatch[1] : 'render';
+                const isShiny = variantMatch && variantMatch[2] === '.shiny';
+                const shinySuffix = isShiny ? '.shiny' : '';
+                const safeBaseName = `${toSafeFilename(identifierPart)}.${branchVariant}${shinySuffix}.png`;
                 const outputPath = path.join(tempDir, safeBaseName);
                 core.info(`Rendering: ${modelPath} -> ${outputPath}`);
                 const success = await (0, threejs_renderer_1.renderBBModelWithThreeJS)(modelPath, outputPath, browser);
@@ -74513,23 +74554,37 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         // Track which entities are new (not present on base branch)
         const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
         const structuredUrls = prEntities.map((entity) => {
+            const safeId = toSafeFilename(entity.identifier);
+            // Normal variant URLs
             const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
             const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
-            const safeId = toSafeFilename(entity.identifier);
             const safeBase = path.join(tempDir, `${safeId}.base.png`);
             const safeHead = path.join(tempDir, `${safeId}.head.png`);
             const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
             const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+            // Shiny variant URLs
+            const originalBaseShiny = path.join(tempDir, `${entity.identifier}.base.shiny.png`);
+            const originalHeadShiny = path.join(tempDir, `${entity.identifier}.head.shiny.png`);
+            const safeBaseShiny = path.join(tempDir, `${safeId}.base.shiny.png`);
+            const safeHeadShiny = path.join(tempDir, `${safeId}.head.shiny.png`);
+            const baseShinyUrl = publicUrls[originalBaseShiny] || publicUrls[safeBaseShiny] || '';
+            const headShinyUrl = publicUrls[originalHeadShiny] || publicUrls[safeHeadShiny] || '';
             const isNew = !baseEntityIds.has(entity.identifier);
-            core.info(`URL mapping for ${entity.identifier}: isNew=${isNew}, base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
+            const entityHasShiny = (0, blockbench_1.hasShinyTexture)(entity);
+            core.info(`URL mapping for ${entity.identifier}: isNew=${isNew}, hasShiny=${entityHasShiny}, ` +
+                `base => ${baseUrl || '[missing]'}, head => ${headUrl || '[missing]'}, ` +
+                `baseShiny => ${baseShinyUrl || '[missing]'}, headShiny => ${headShinyUrl || '[missing]'}`);
             return {
                 identifier: entity.identifier,
                 base: baseUrl,
                 head: headUrl,
+                baseShiny: baseShinyUrl,
+                headShiny: headShinyUrl,
                 isNew,
+                hasShiny: entityHasShiny,
             };
         });
-        // Filter out rows where both images are missing
+        // Filter out rows where both normal images are missing
         const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
         await (0, comment_1.postComment)(nonEmptyRows);
         core.info('Rendering process complete.');
@@ -74876,12 +74931,13 @@ async function renderModel(geometry, textureDataUrl) {
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z);
   
-  // Position camera to see the whole model
+  // Position camera to see the whole model from North-West corner
+  // In Minecraft: North = -Z, West = -X
   const distance = maxDim * 2.5;
   camera.position.set(
-    center.x + distance * 0.7,
+    center.x - distance * 0.7,
     center.y + distance * 0.5,
-    center.z + distance * 0.7
+    center.z - distance * 0.7
   );
   camera.lookAt(center);
   

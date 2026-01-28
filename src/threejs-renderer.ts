@@ -326,12 +326,13 @@ async function renderModel(geometry, textureDataUrl) {
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z);
   
-  // Position camera to see the whole model
+  // Position camera to see the whole model from North-West corner
+  // In Minecraft: North = -Z, West = -X
   const distance = maxDim * 2.5;
   camera.position.set(
-    center.x + distance * 0.7,
+    center.x - distance * 0.7,
     center.y + distance * 0.5,
-    center.z + distance * 0.7
+    center.z - distance * 0.7
   );
   camera.lookAt(center);
   
