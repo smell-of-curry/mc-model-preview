@@ -486,7 +486,7 @@ async function renderAnimationGif(
     width: GIF_CONFIG.width,
     height: GIF_CONFIG.height,
     delay: GIF_CONFIG.frameDelay,
-  }, browser);
+  });
   
   if (!success) {
     core.warning(`Failed to create GIF for ${animationId}`);
