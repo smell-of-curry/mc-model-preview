@@ -147,6 +147,30 @@ async function renderModelWithBlockbenchWeb(
     
     core.info('Blockbench web loaded successfully');
     
+    // Initialize any missing globals that Blockbench expects
+    await page.evaluate(() => {
+      const win = window as any;
+      
+      // Ensure markerColors exists (needed for element color property)
+      if (!win.markerColors) {
+        win.markerColors = [
+          { id: 'gray', standard: '#808080', pastel: '#c0c0c0' },
+          { id: 'red', standard: '#ff0000', pastel: '#ffcccc' },
+          { id: 'orange', standard: '#ff8800', pastel: '#ffe0cc' },
+          { id: 'yellow', standard: '#ffff00', pastel: '#ffffcc' },
+          { id: 'green', standard: '#00ff00', pastel: '#ccffcc' },
+          { id: 'blue', standard: '#0088ff', pastel: '#cce5ff' },
+          { id: 'purple', standard: '#8800ff', pastel: '#e5ccff' },
+          { id: 'pink', standard: '#ff00ff', pastel: '#ffccff' },
+        ];
+      }
+      
+      // Ensure settings.inherit_parent_color exists
+      if (win.settings && !win.settings.inherit_parent_color) {
+        win.settings.inherit_parent_color = { value: false };
+      }
+    });
+    
     // Read the bbmodel file content
     const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
     
