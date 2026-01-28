@@ -74427,27 +74427,50 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
         const result = await page.evaluate(async (modelJson) => {
             try {
                 const win = window;
-                // Parse our bbmodel JSON
+                // Parse our bbmodel JSON (this is a native Blockbench project format)
                 const bbmodel = JSON.parse(modelJson);
-                // Build proper Bedrock geometry format
-                const bedrockGeo = {
-                    format_version: '1.12.0',
-                    'minecraft:geometry': [{
-                            description: {
-                                identifier: `geometry.${bbmodel.name || 'model'}`,
-                                texture_width: bbmodel.resolution?.width || 16,
-                                texture_height: bbmodel.resolution?.height || 16,
-                            },
-                            bones: bbmodel.elements || []
-                        }]
-                };
-                // Note: The Interface.tab_bar.new_tab issue is fixed by patching bundle.js above
-                // Now try to load the model using Codecs.bedrock.load()
-                if (win.Codecs?.bedrock?.load) {
+                // Try to load directly as a bbmodel project file
+                // This avoids the complex bedrock codec initialization
+                if (win.Codecs?.project?.load) {
+                    try {
+                        win.Codecs.project.load(bbmodel, { path: 'model.bbmodel' });
+                    }
+                    catch (projectErr) {
+                        console.warn('project.load failed, trying bedrock codec:', projectErr?.message);
+                        // Fall back to bedrock codec if project codec fails
+                        const bedrockGeo = {
+                            format_version: '1.12.0',
+                            'minecraft:geometry': [{
+                                    description: {
+                                        identifier: `geometry.${bbmodel.name || 'model'}`,
+                                        texture_width: bbmodel.resolution?.width || 16,
+                                        texture_height: bbmodel.resolution?.height || 16,
+                                    },
+                                    bones: bbmodel.elements || []
+                                }]
+                        };
+                        if (win.Codecs?.bedrock?.load) {
+                            win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
+                        }
+                    }
+                }
+                else if (win.Codecs?.bedrock?.load) {
+                    // Fallback: Build proper Bedrock geometry format
+                    const bedrockGeo = {
+                        format_version: '1.12.0',
+                        'minecraft:geometry': [{
+                                description: {
+                                    identifier: `geometry.${bbmodel.name || 'model'}`,
+                                    texture_width: bbmodel.resolution?.width || 16,
+                                    texture_height: bbmodel.resolution?.height || 16,
+                                },
+                                bones: bbmodel.elements || []
+                            }]
+                    };
                     win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
                 }
                 else {
-                    return { success: false, error: 'Codecs.bedrock.load not available' };
+                    return { success: false, error: 'No suitable codec available' };
                 }
                 // Wait for model to load and render
                 await new Promise(resolve => setTimeout(resolve, 2000));
