@@ -2,15 +2,42 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as path from 'path';
 import { parseResourcePack } from './parser';
-import { getChangedFiles, findAffectedEntities } from './differ'; // We'll need to split differ
+import { getChangedFiles, findAffectedEntities } from './differ';
 import { checkout, getHeadSha } from './git';
 import { renderChanges } from './renderer';
+import { runPostMode } from './post-comment';
 import { Entity } from './types';
+
+type ActionMode = 'render' | 'post';
 
 async function run(): Promise<void> {
   try {
     core.info('Starting Minecraft Model Preview action...');
-
+    
+    // Check mode input
+    const mode = (core.getInput('mode') || 'render') as ActionMode;
+    core.info(`Running in ${mode} mode`);
+    
+    if (mode === 'post') {
+      // Post mode: upload images from artifact and post comment
+      const artifactPath = core.getInput('artifact-path');
+      if (!artifactPath) {
+        core.setFailed('artifact-path input is required for post mode');
+        return;
+      }
+      
+      const workspaceDir = process.env['GITHUB_WORKSPACE'] || process.cwd();
+      const resolvedArtifactPath = path.isAbsolute(artifactPath)
+        ? artifactPath
+        : path.resolve(workspaceDir, artifactPath);
+      
+      await runPostMode({ artifactPath: resolvedArtifactPath });
+      core.info('Action completed successfully.');
+      process.exit(0);
+      return;
+    }
+    
+    // Render mode (default): render models and either post comment or save artifact
     const baseRef = github.context.payload.pull_request?.base.ref;
     const headRef = github.context.payload.pull_request?.head.ref;
     if (!baseRef || !headRef) {

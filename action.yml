@@ -10,6 +10,13 @@ inputs:
     description: 'The path to the resource pack in the repository.'
     required: false
     default: '.'
+  mode:
+    description: 'Action mode: "render" to render models (default), "post" to post comment from downloaded artifact.'
+    required: false
+    default: 'render'
+  artifact-path:
+    description: 'Path to the downloaded artifact directory (required for "post" mode).'
+    required: false
 
 runs:
   using: 'node20'

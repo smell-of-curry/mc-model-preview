@@ -6,7 +6,7 @@ import * as fs from 'fs/promises';
 import * as github from '@actions/github';
 import { Entity, ChangedAnimation, AnimationFile } from './types';
 import { createBBFile, hasShinyTexture, TextureVariant } from './blockbench';
-import { uploadImages } from './image-hosting';
+import { uploadImagesWithForkSupport, ArtifactMetadata } from './image-hosting';
 import { postComment, AnimationUrlSet } from './comment';
 import { checkout } from './git';
 import { renderBBModelWithThreeJS, renderAnimationFrames, loadTextureAsDataURL } from './threejs-renderer';
@@ -224,8 +224,22 @@ export async function renderChanges(
       browser
     );
     
-    const publicUrls = await uploadImages(tempDir, github.context.issue.number);
+    // Build metadata for fork PRs (used by workflow_run to post comment)
+    const metadata: ArtifactMetadata = {
+      prNumber: github.context.issue.number,
+      repo: `${github.context.repo.owner}/${github.context.repo.repo}`,
+      headSha,
+      affectedEntities: prEntities.map(e => e.identifier),
+    };
+    
+    const uploadResult = await uploadImagesWithForkSupport(tempDir, github.context.issue.number, { metadata });
+    const publicUrls = uploadResult.imageUrls;
     core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
+    
+    if (uploadResult.isFork) {
+      core.info('Fork PR detected - images uploaded as artifact');
+      core.info(`Artifact contains metadata for workflow_run to post comment`);
+    }
     
     // Track which entities are new (not present on base branch)
     const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
@@ -271,10 +285,12 @@ export async function renderChanges(
       };
     });
     
-    // Filter out rows where both normal images are missing
-    const nonEmptyRows = structuredUrls.filter(
-      (u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0)
-    );
+    // Filter out rows where both normal images are missing (unless fork PR)
+    const nonEmptyRows = uploadResult.isFork 
+      ? structuredUrls  // Keep all for fork PRs to list affected entities
+      : structuredUrls.filter(
+          (u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0)
+        );
     
     // Build animation URL sets from rendered GIFs
     core.info(`Looking for animation GIF URLs. Available keys: ${Object.keys(publicUrls).join(', ')}`);
@@ -291,11 +307,15 @@ export async function renderChanges(
         gifUrl,
         isNew: anim.isNew,
       };
-    }).filter((a) => a.gifUrl.length > 0);
+    }).filter((a) => a.gifUrl.length > 0 || uploadResult.isFork);
     
     core.info(`Animation URL sets after filter: ${JSON.stringify(animationUrlSets)}`);
     
-    await postComment(nonEmptyRows, animationUrlSets);
+    await postComment(nonEmptyRows, animationUrlSets, {
+      isForkPR: uploadResult.isFork,
+      artifactName: uploadResult.artifactName,
+      affectedEntities: prEntities.map(e => e.identifier),
+    });
     
     core.info('Rendering process complete.');
   } finally {
