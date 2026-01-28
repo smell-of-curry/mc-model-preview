@@ -11,11 +11,15 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
     materials: {},
   };
 
+  core.info(`Resource pack path: ${resourcePackPath}`);
+
   // 1) Models (geometries)
-  const modelsGlob = await glob.create(
-    `${resourcePackPath}/models/**/*.json`
-  );
+  const modelsPattern = `${resourcePackPath}/models/**/*.json`;
+  core.info(`Models glob pattern: ${modelsPattern}`);
+  const modelsGlob = await glob.create(modelsPattern);
+  let modelFileCount = 0;
   for await (const file of modelsGlob.globGenerator()) {
+    modelFileCount++;
     try {
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
@@ -40,12 +44,31 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
       core.warning(`Could not parse model file ${file}: ${error}`);
     }
   }
+  core.info(`Scanned ${modelFileCount} model files, found ${Object.keys(resourceMap.geometries).length} geometry identifiers.`);
+
+  // Debug: if no models found, list the directory to help diagnose
+  if (modelFileCount === 0) {
+    try {
+      const modelsDir = path.join(resourcePackPath, 'models');
+      const dirExists = await fs.stat(modelsDir).then(() => true).catch(() => false);
+      if (dirExists) {
+        const contents = await fs.readdir(modelsDir);
+        core.info(`Models directory exists. Contents: ${contents.slice(0, 10).join(', ')}${contents.length > 10 ? '...' : ''}`);
+      } else {
+        core.warning(`Models directory does not exist at: ${modelsDir}`);
+      }
+    } catch (e) {
+      core.warning(`Could not list models directory: ${e}`);
+    }
+  }
 
   // 2) Animations
-  const animationsGlob = await glob.create(
-    `${resourcePackPath}/animations/**/*.json`
-  );
+  const animPattern = `${resourcePackPath}/animations/**/*.json`;
+  core.info(`Animations glob pattern: ${animPattern}`);
+  const animationsGlob = await glob.create(animPattern);
+  let animFileCount = 0;
   for await (const file of animationsGlob.globGenerator()) {
+    animFileCount++;
     try {
       const content = await fs.readFile(file, 'utf-8');
       const json = JSON.parse(content);
@@ -59,6 +82,7 @@ async function buildResourceMap(resourcePackPath: string): Promise<ResourceMap> 
       core.warning(`Could not parse animation file ${file}: ${error}`);
     }
   }
+  core.info(`Scanned ${animFileCount} animation files, found ${Object.keys(resourceMap.animations).length} animation identifiers.`);
 
   // 3) Materials (.material and .json)
   const materialsGlobA = await glob.create(
@@ -139,7 +163,9 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
       if (description.textures) {
         for (const key in description.textures) {
           const texturePath = description.textures[key];
-          entity.textureFiles.push(texturePath);
+          if (typeof texturePath === 'string' && texturePath.length > 0) {
+            entity.textureFiles.push(texturePath);
+          }
         }
       }
 

@@ -56,12 +56,21 @@ export async function createBBFile(
 ): Promise<BBModel> {
   if (!entity.geometryFiles || entity.geometryFiles.length === 0) {
     throw new Error(
-      `No geometry files mapped for entity "${entity.identifier}"`
+      `No geometry files mapped for entity "${entity.identifier}". ` +
+      `This usually means the geometry was not found in the resource map.`
     );
   }
+  
+  const firstGeoFile = entity.geometryFiles[0];
+  if (typeof firstGeoFile !== 'string') {
+    throw new Error(
+      `Invalid geometry file for entity "${entity.identifier}": expected string, got ${typeof firstGeoFile}`
+    );
+  }
+  
   // Load the first geometry file
   // Note: We are simplifying by only loading the first geometry file.
-  const geoPath = path.join(resourcePackPath, entity.geometryFiles[0]);
+  const geoPath = path.join(resourcePackPath, firstGeoFile);
   const geoContent = await fs.readFile(geoPath, 'utf-8');
   const geoJson = JSON.parse(geoContent);
   const geoArray = geoJson['minecraft:geometry'];
