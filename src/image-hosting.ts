@@ -64,12 +64,12 @@ export async function uploadImages(
   const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
   
   const imageUrls: Record<string, string> = {};
-  // Recursively discover PNGs to support nested outputs
+  // Recursively discover PNGs and GIFs to support nested outputs
   const found = await exec.getExecOutput('bash', [
     '-lc',
-    `set -o pipefail; find '${imageDir}' -type f -name '*.png' -printf '%p\n' | sort | cat`,
+    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' \\) -printf '%p\n' | sort | cat`,
   ]);
-  core.info(`Uploader discovered PNGs under ${imageDir}:\n${found.stdout}`);
+  core.info(`Uploader discovered images under ${imageDir}:\n${found.stdout}`);
 
   for (const absPath of found.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
     const relPath = path.relative(imageDir, absPath).replace(/\\/g, '/');
