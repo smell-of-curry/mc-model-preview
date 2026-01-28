@@ -92,43 +92,39 @@ async function renderModelWithBlockbenchWeb(
           const response = await fetch(url);
           let scriptContent = await response.text();
           
-                    // Fix Interface.tab_bar.new_tab access where tab_bar is undefined
+          // === CRITICAL PATCH: Interface.tab_bar.new_tab ===
+          // Blockbench web doesn't have tab_bar initialized in headless mode
           scriptContent = scriptContent.replace(
             /Interface\.tab_bar\.new_tab/g,
             '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})'
           );
           
-          // Fix color inheritance where parent might be undefined
-          // Pattern: inherit_parent_color.value&&(X.color=Y.color)
-          // The Y (parent) might be undefined
+          // === PATCH: northMarkMaterial.color in buildGrid ===
+          // When 3D preview fails to init, this material might not exist
           scriptContent = scriptContent.replace(
-            /inherit_parent_color\.value\s*&&\s*\((\w+)\.color\s*=\s*(\w+)\.color\)/g,
-            'inherit_parent_color?.value&&$2&&($1.color=$2.color)'
+            /ct\.northMarkMaterial\.color=/g,
+            '(ct.northMarkMaterial?ct.northMarkMaterial.color='
+          );
+          // Close the ternary - this is safe because the original line ends with ;
+          // Original: ct.northMarkMaterial.color=uc.grid;
+          // Patched: (ct.northMarkMaterial?ct.northMarkMaterial.color=uc.grid:0);
+          scriptContent = scriptContent.replace(
+            /\(ct\.northMarkMaterial\?ct\.northMarkMaterial\.color=([^;]+);/g,
+            '(ct.northMarkMaterial?ct.northMarkMaterial.color=$1:0);'
           );
           
-          // Fix direct parent.color access patterns
+          // === PATCH: three_grid.children.empty() ===
+          // Guard against missing three_grid
           scriptContent = scriptContent.replace(
-            /(\w+)\.addTo\((\w+)\)\s*,\s*\1\.color\s*=\s*\2\.color/g,
-            '$1.addTo($2),$2&&($1.color=$2.color)'
+            /three_grid\.children\.empty\(\)/g,
+            '(three_grid&&three_grid.children?three_grid.children.empty():null)'
           );
           
-          // Fix canvas access where the object might be null
-          // Pattern: something.canvas.toDataURL -> something?.canvas?.toDataURL
+          // === PATCH: side_grids access ===
+          // Guard against missing side_grids
           scriptContent = scriptContent.replace(
-            /(\w+)\.canvas\.toDataURL/g,
-            '$1?.canvas?.toDataURL'
-          );
-          
-          // Fix updateThumbnail calls that access canvas on null
-          scriptContent = scriptContent.replace(
-            /\.updateThumbnail\s*\(\s*\)/g,
-            '?.updateThumbnail?.()'
-          );
-          
-          // Fix preview pane canvas access
-          scriptContent = scriptContent.replace(
-            /Preview\.selected\.canvas/g,
-            'Preview?.selected?.canvas'
+            /ct\.side_grids&&\(ct\.side_grids\.x\.children\.empty\(\),ct\.side_grids\.z\.children\.empty\(\)\)/g,
+            'ct.side_grids&&ct.side_grids.x&&ct.side_grids.z&&(ct.side_grids.x.children.empty(),ct.side_grids.z.children.empty())'
           );
           
           request.respond({

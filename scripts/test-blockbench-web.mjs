@@ -4,7 +4,7 @@
  * Tests Blockbench web rendering with headless Chrome
  * 
  * Run locally: node scripts/test-blockbench-web.mjs
- * Run in Docker: docker build -f Dockerfile.test -t mc-model-test . && docker run --rm mc-model-test
+ * Run in Docker: ./scripts/test-docker.sh
  */
 
 import puppeteer from 'puppeteer-core';
@@ -61,6 +61,10 @@ async function testBlockbenchWebRender() {
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--headless=new',
+            // WebGL support
+            '--use-gl=swiftshader',
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
         ],
     });
     
@@ -85,20 +89,35 @@ async function testBlockbenchWebRender() {
                     const response = await fetch(url);
                     let scriptContent = await response.text();
                     
-                    // CRITICAL FIX: The error is "Interface.tab_bar.new_tab" 
-                    // where Interface.tab_bar is undefined in web version
-                    // Replace all instances of Interface.tab_bar.new_tab with safe access
+                    // === CRITICAL PATCH: Interface.tab_bar.new_tab ===
+                    // Blockbench web doesn't have tab_bar initialized in headless mode
                     scriptContent = scriptContent.replace(
                         /Interface\.tab_bar\.new_tab/g,
                         '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})'
                     );
                     
-                    // Also fix updateThumbnail which tries to access canvas on a null element
-                    // The pattern is typically: something.canvas.toDataURL()
-                    // Replace with safe access
+                    // === PATCH: northMarkMaterial.color in buildGrid ===
+                    // When 3D preview fails to init, this material might not exist
                     scriptContent = scriptContent.replace(
-                        /\.canvas\.toDataURL\(/g,
-                        '?.canvas?.toDataURL?.('
+                        /ct\.northMarkMaterial\.color=/g,
+                        '(ct.northMarkMaterial?ct.northMarkMaterial.color='
+                    );
+                    // Close the ternary
+                    scriptContent = scriptContent.replace(
+                        /\(ct\.northMarkMaterial\?ct\.northMarkMaterial\.color=([^;]+);/g,
+                        '(ct.northMarkMaterial?ct.northMarkMaterial.color=$1:0);'
+                    );
+                    
+                    // === PATCH: three_grid.children.empty() ===
+                    scriptContent = scriptContent.replace(
+                        /three_grid\.children\.empty\(\)/g,
+                        '(three_grid&&three_grid.children?three_grid.children.empty():null)'
+                    );
+                    
+                    // === PATCH: side_grids access ===
+                    scriptContent = scriptContent.replace(
+                        /ct\.side_grids&&\(ct\.side_grids\.x\.children\.empty\(\),ct\.side_grids\.z\.children\.empty\(\)\)/g,
+                        'ct.side_grids&&ct.side_grids.x&&ct.side_grids.z&&(ct.side_grids.x.children.empty(),ct.side_grids.z.children.empty())'
                     );
                     
                     request.respond({
@@ -106,7 +125,7 @@ async function testBlockbenchWebRender() {
                         contentType: 'application/javascript',
                         body: scriptContent
                     });
-                    console.log('[mc-model-preview] Patched bundle.js (Interface.tab_bar.new_tab fix)');
+                    console.log('[mc-model-preview] Patched Blockbench bundle.js');
                     return;
                 } catch (e) {
                     console.log('[mc-model-preview] Failed to patch bundle:', e.message);
@@ -116,9 +135,9 @@ async function testBlockbenchWebRender() {
             request.continue();
         });
         
-        // Also inject early patching code to create Interface.tab_bar
+        // Inject early patching code
         await page.evaluateOnNewDocument(() => {
-            const patchInterface = () => {
+            const patchGlobals = () => {
                 // Ensure Interface.tab_bar exists with new_tab stub
                 if (window.Interface && !window.Interface.tab_bar) {
                     window.Interface.tab_bar = {
@@ -132,13 +151,43 @@ async function testBlockbenchWebRender() {
                     console.log('[mc-model-preview] Created Interface.tab_bar stub');
                 }
                 
-                // Also patch settings just in case
-                if (window.settings && !window.settings.new_tab) {
-                    window.settings.new_tab = { value: false };
+                // Ensure markerColors exists (needed for element color property)
+                if (!window.markerColors) {
+                    window.markerColors = [
+                        { id: 'gray', standard: '#808080', pastel: '#c0c0c0' },
+                        { id: 'red', standard: '#ff0000', pastel: '#ffcccc' },
+                        { id: 'orange', standard: '#ff8800', pastel: '#ffe0cc' },
+                        { id: 'yellow', standard: '#ffff00', pastel: '#ffffcc' },
+                        { id: 'green', standard: '#00ff00', pastel: '#ccffcc' },
+                        { id: 'blue', standard: '#0088ff', pastel: '#cce5ff' },
+                        { id: 'purple', standard: '#8800ff', pastel: '#e5ccff' },
+                        { id: 'pink', standard: '#ff00ff', pastel: '#ffccff' },
+                    ];
+                }
+                
+                // Ensure settings has needed properties
+                if (window.settings) {
+                    if (!window.settings.new_tab) {
+                        window.settings.new_tab = { value: false };
+                    }
+                    if (!window.settings.inherit_parent_color) {
+                        window.settings.inherit_parent_color = { value: false };
+                    }
                 }
             };
-            const interval = setInterval(patchInterface, 10);
+            const interval = setInterval(patchGlobals, 10);
             setTimeout(() => clearInterval(interval), 30000);
+        });
+        
+        // Enable console logging from the page
+        page.on('console', msg => {
+            if (msg.type() === 'error' || msg.text().includes('[mc-model-preview]')) {
+                console.log(`Browser ${msg.type()}: ${msg.text()}`);
+            }
+        });
+        
+        page.on('pageerror', err => {
+            console.log('Page error:', err.message);
         });
         
         console.log('\n--- Loading Blockbench web ---');
@@ -148,6 +197,18 @@ async function testBlockbenchWebRender() {
         });
         
         console.log('Page loaded, waiting for Blockbench to initialize...');
+        
+        // Check what globals exist before waiting
+        const preCheck = await page.evaluate(() => {
+            return {
+                hasBlockbench: typeof window.Blockbench !== 'undefined',
+                hasCodecs: typeof window.Codecs !== 'undefined',
+                hasFormats: typeof window.Formats !== 'undefined',
+                hasNewProject: typeof window.newProject !== 'undefined',
+                windowKeys: Object.keys(window).filter(k => k.match(/^[A-Z]/)).slice(0, 20),
+            };
+        });
+        console.log('Pre-check globals:', JSON.stringify(preCheck, null, 2));
         
         // Wait for Blockbench globals
         await page.waitForFunction(
@@ -163,28 +224,49 @@ async function testBlockbenchWebRender() {
         
         console.log('Blockbench loaded successfully!');
         
-        // Check initial state of settings
+        // Initialize missing globals after Blockbench loads
+        await page.evaluate(() => {
+            const win = window;
+            
+            // Ensure markerColors exists
+            if (!win.markerColors) {
+                win.markerColors = [
+                    { id: 'gray', standard: '#808080', pastel: '#c0c0c0' },
+                    { id: 'red', standard: '#ff0000', pastel: '#ffcccc' },
+                    { id: 'orange', standard: '#ff8800', pastel: '#ffe0cc' },
+                    { id: 'yellow', standard: '#ffff00', pastel: '#ffffcc' },
+                    { id: 'green', standard: '#00ff00', pastel: '#ccffcc' },
+                    { id: 'blue', standard: '#0088ff', pastel: '#cce5ff' },
+                    { id: 'purple', standard: '#8800ff', pastel: '#e5ccff' },
+                    { id: 'pink', standard: '#ff00ff', pastel: '#ffccff' },
+                ];
+            }
+            
+            // Ensure settings.inherit_parent_color exists
+            if (win.settings && !win.settings.inherit_parent_color) {
+                win.settings.inherit_parent_color = { value: false };
+            }
+        });
+        
+        // Check initial state
         const initialState = await page.evaluate(() => {
             const win = window;
             return {
-                hasSettings: typeof win.settings !== 'undefined',
-                settingsType: typeof win.settings,
-                settingsIsNull: win.settings === null,
-                hasNewTab: win.settings?.new_tab !== undefined,
-                newTabType: typeof win.settings?.new_tab,
                 blockbenchVersion: win.Blockbench?.version,
+                hasMarkerColors: Array.isArray(win.markerColors),
+                markerColorsLength: win.markerColors?.length,
+                hasSettings: typeof win.settings !== 'undefined',
                 codecKeys: win.Codecs ? Object.keys(win.Codecs).slice(0, 10) : [],
-                formatKeys: win.Formats ? Object.keys(win.Formats).slice(0, 10) : [],
             };
         });
         
         console.log('\n--- Initial Blockbench state ---');
         console.log(JSON.stringify(initialState, null, 2));
         
-        // Test the actual rendering logic (same as in renderer.ts)
-        console.log('\n--- Testing model load with settings fix ---');
+        // Test the actual rendering logic
+        console.log('\n--- Testing model load ---');
         
-        // Create a simple test geometry
+        // Create a simple test geometry (same format as we generate)
         const testGeoJson = {
             format_version: '1.12.0',
             'minecraft:geometry': [{
@@ -213,61 +295,10 @@ async function testBlockbenchWebRender() {
                 const win = window;
                 
                 log('Starting model load...');
-                log('window.settings.new_tab exists: ' + !!win.settings?.new_tab);
+                log('markerColors exists: ' + Array.isArray(win.markerColors));
+                log('markerColors length: ' + (win.markerColors?.length || 0));
                 
-                // Explore available APIs
-                log('Codecs.bedrock methods: ' + Object.keys(win.Codecs?.bedrock || {}).join(', '));
-                log('Formats.bedrock methods: ' + Object.getOwnPropertyNames(Object.getPrototypeOf(win.Formats?.bedrock || {})).join(', '));
-                
-                // The error is in Format.select which has a module-scoped 'settings' that's undefined
-                // Let's try to manually create a project and load geometry without triggering select
-                
-                // Method 1: Try to use setupProject directly instead of through Codecs
-                if (win.setupProject && win.Formats?.bedrock) {
-                    log('Trying setupProject directly...');
-                    try {
-                        // setupProject might not trigger select
-                        win.setupProject(win.Formats.bedrock);
-                        log('setupProject succeeded');
-                    } catch (e) {
-                        log('setupProject failed: ' + e.message);
-                    }
-                }
-                
-                // Method 2: Try to import geometry directly without newProject
-                if (win.Codecs?.bedrock?.parse) {
-                    log('Trying to parse geometry...');
-                    try {
-                        const parsed = win.Codecs.bedrock.parse(bedrockGeo, 'model.geo.json');
-                        log('Parse result type: ' + typeof parsed);
-                        log('Parsed keys: ' + Object.keys(parsed || {}).join(', '));
-                    } catch (e) {
-                        log('Parse error: ' + e.message);
-                    }
-                }
-                
-                // Method 3: Try Project.new() if available
-                if (win.Project) {
-                    log('Project class exists, methods: ' + Object.keys(win.Project).join(', '));
-                }
-                
-                // Method 4: Try ModelProject if available
-                if (win.ModelProject) {
-                    log('ModelProject exists');
-                }
-                
-                // Method 5: Check if there's a way to create elements directly
-                if (win.Cube || win.Mesh) {
-                    log('Direct element classes exist: Cube=' + !!win.Cube + ', Mesh=' + !!win.Mesh);
-                }
-                
-                // Let's try to understand the Format.select code by getting its source
-                if (win.Formats?.bedrock?.select) {
-                    const selectStr = win.Formats.bedrock.select.toString().substring(0, 500);
-                    log('Format.select source preview: ' + selectStr);
-                }
-                
-                // Try to load - catch errors but continue to try to render
+                // Try to load using the bedrock codec
                 log('Attempting Codecs.bedrock.load...');
                 let loadError = null;
                 try {
@@ -275,22 +306,25 @@ async function testBlockbenchWebRender() {
                     log('Load succeeded!');
                 } catch (loadErr) {
                     loadError = loadErr;
-                    log('Load error (might be recoverable): ' + loadErr.message);
+                    log('Load error: ' + loadErr.message);
+                    log('Stack: ' + (loadErr.stack || '').split('\n').slice(0, 3).join('\n'));
                 }
                 
-                // Check if a project was created despite the error
-                log('Project created: ' + !!win.Project);
+                // Check if anything was created
                 log('Outliner elements: ' + (win.Outliner?.elements?.length || 0));
+                log('Project exists: ' + !!win.Project);
                 
-                // Even if there was an error, check if we can get a render
-                // The model might have loaded partially
-                
-                // Wait for model to load
+                // Wait for any async loading
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 
                 // Try to center the model
                 if (win.Canvas?.center) {
-                    win.Canvas.center();
+                    try {
+                        win.Canvas.center();
+                        log('Canvas.center() called');
+                    } catch (e) {
+                        log('Canvas.center() error: ' + e.message);
+                    }
                 }
                 
                 await new Promise(resolve => setTimeout(resolve, 500));
@@ -298,26 +332,31 @@ async function testBlockbenchWebRender() {
                 // Get the preview canvas
                 const canvas = document.querySelector('#preview canvas');
                 if (!canvas) {
-                    return { success: false, error: 'Preview canvas not found' };
+                    return { 
+                        success: false, 
+                        error: 'Preview canvas not found',
+                        logs 
+                    };
                 }
                 
+                log('Canvas found, getting image data...');
                 const dataUrl = canvas.toDataURL('image/png');
                 
                 if (dataUrl.length < 1000) {
                     return { 
                         success: false, 
                         error: `Canvas data too small (${dataUrl.length} chars)`,
-                        dataUrlPreview: dataUrl.substring(0, 100)
+                        logs
                     };
                 }
                 
                 const elementCount = win.Outliner?.elements?.length || 0;
                 
                 return { 
-                    success: true, 
+                    success: !loadError,
+                    loadError: loadError?.message,
                     elementCount,
                     dataUrlLength: dataUrl.length,
-                    dataUrlPreview: dataUrl.substring(0, 100) + '...',
                     logs
                 };
                 
@@ -326,7 +365,7 @@ async function testBlockbenchWebRender() {
                     success: false, 
                     error: e.message || String(e),
                     stack: e.stack,
-                    logs: typeof logs !== 'undefined' ? logs : []
+                    logs
                 };
             }
         }, testGeoJson);
@@ -336,39 +375,23 @@ async function testBlockbenchWebRender() {
             console.log('Logs from evaluate:');
             result.logs.forEach(log => console.log('  ' + log));
         }
-        console.log('Result:', JSON.stringify({ ...result, logs: undefined }, null, 2));
+        console.log('\nResult:', JSON.stringify({ ...result, logs: undefined }, null, 2));
         
         if (result.success) {
             console.log('\n✅ SUCCESS: Model rendered successfully!');
             console.log(`   Elements loaded: ${result.elementCount}`);
             console.log(`   Image data size: ${result.dataUrlLength} chars`);
         } else {
-            console.log('\n❌ FAILED:', result.error);
+            console.log('\n❌ FAILED:', result.error || result.loadError);
             if (result.stack) {
                 console.log('Stack trace:', result.stack);
             }
             
             // Take a screenshot for debugging
-            await page.screenshot({ path: 'debug-screenshot.png' });
-            console.log('Debug screenshot saved to debug-screenshot.png');
-            
-            // Get console logs
-            page.on('console', msg => console.log('Browser console:', msg.text()));
+            const screenshotPath = path.join(projectDir, 'debug-screenshot.png');
+            await page.screenshot({ path: screenshotPath });
+            console.log(`Debug screenshot saved to ${screenshotPath}`);
         }
-        
-        // Additional debugging - check what's in settings after loading
-        const finalState = await page.evaluate(() => {
-            const win = window;
-            return {
-                settingsKeys: win.settings ? Object.keys(win.settings).slice(0, 20) : [],
-                newTabValue: win.settings?.new_tab,
-                projectExists: !!win.Project,
-                outlinerElements: win.Outliner?.elements?.length || 0,
-            };
-        });
-        
-        console.log('\n--- Final state ---');
-        console.log(JSON.stringify(finalState, null, 2));
         
         return result.success;
         
