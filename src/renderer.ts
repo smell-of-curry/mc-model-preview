@@ -112,6 +112,25 @@ async function renderModelWithBlockbenchWeb(
             '$1.addTo($2),$2&&($1.color=$2.color)'
           );
           
+          // Fix canvas access where the object might be null
+          // Pattern: something.canvas.toDataURL -> something?.canvas?.toDataURL
+          scriptContent = scriptContent.replace(
+            /(\w+)\.canvas\.toDataURL/g,
+            '$1?.canvas?.toDataURL'
+          );
+          
+          // Fix updateThumbnail calls that access canvas on null
+          scriptContent = scriptContent.replace(
+            /\.updateThumbnail\s*\(\s*\)/g,
+            '?.updateThumbnail?.()'
+          );
+          
+          // Fix preview pane canvas access
+          scriptContent = scriptContent.replace(
+            /Preview\.selected\.canvas/g,
+            'Preview?.selected?.canvas'
+          );
+          
           request.respond({
             status: 200,
             contentType: 'application/javascript',
