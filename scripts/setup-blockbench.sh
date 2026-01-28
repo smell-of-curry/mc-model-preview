@@ -1,45 +1,51 @@
 #!/bin/bash
+# Setup script for mc-model-preview
+# This script ensures Chrome/Chromium is available for rendering
+
 set -e
 
-# Define BlockBench version
-BB_VERSION="4.11.0"
-BB_APP_IMAGE="Blockbench_${BB_VERSION}.AppImage"
-BB_EXTRACTED_DIR="Blockbench_extracted"
+echo "Checking for Chrome/Chromium..."
 
-# Download BlockBench AppImage
-if [ ! -f "$BB_APP_IMAGE" ]; then
-  echo "Downloading BlockBench v${BB_VERSION}... (this may take a moment)"
-  wget -q "https://github.com/JannisX11/blockbench/releases/download/v${BB_VERSION}/${BB_APP_IMAGE}"
-  echo "Download complete."
+# Check for Google Chrome
+if command -v google-chrome &> /dev/null; then
+    echo "Found Google Chrome: $(google-chrome --version)"
+    exit 0
+fi
+
+# Check for Chromium
+if command -v chromium-browser &> /dev/null; then
+    echo "Found Chromium: $(chromium-browser --version)"
+    exit 0
+fi
+
+if command -v chromium &> /dev/null; then
+    echo "Found Chromium: $(chromium --version)"
+    exit 0
+fi
+
+# If running on Ubuntu/Debian, try to install Chrome
+if command -v apt-get &> /dev/null; then
+    echo "Chrome not found, attempting to install..."
+    
+    # Try to install chromium-browser
+    sudo apt-get update || true
+    sudo apt-get install -y chromium-browser || {
+        # If chromium-browser fails, try google-chrome
+        echo "Installing Google Chrome..."
+        wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+        sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
+        rm /tmp/chrome.deb
+    }
+fi
+
+# Verify installation
+if command -v google-chrome &> /dev/null; then
+    echo "Google Chrome installed: $(google-chrome --version)"
+elif command -v chromium-browser &> /dev/null; then
+    echo "Chromium installed: $(chromium-browser --version)"
 else
-  echo "BlockBench AppImage already exists."
+    echo "Warning: Chrome/Chromium installation may have failed"
+    echo "The action will try to find a browser at runtime"
 fi
 
-# Make it executable
-chmod +x "$BB_APP_IMAGE"
-
-# Try to ensure AppImage can run; if FUSE is missing, fall back to extraction
-echo "Verifying AppImage runtime..."
-# Attempt to install libfuse2, xvfb, and mesa libraries for software rendering (ignore failures)
-if command -v sudo >/dev/null 2>&1; then
-  sudo apt-get update -y >/dev/null 2>&1 || true
-  # Install dependencies:
-  # - libfuse2: for AppImage support
-  # - xvfb: virtual framebuffer for headless display
-  # - libegl1-mesa, libgl1-mesa-dri, libgl1-mesa-glx: Mesa OpenGL for software rendering
-  # - libosmesa6: Off-screen Mesa rendering
-  sudo apt-get install -y libfuse2 xvfb libegl1-mesa libgl1-mesa-dri libgl1-mesa-glx libosmesa6 >/dev/null 2>&1 || true
-fi
-
-# Extract AppImage unconditionally to avoid setuid sandbox issues and prefer AppRun
-if [ ! -d "$BB_EXTRACTED_DIR" ]; then
-  echo "Extracting BlockBench AppImage..."
-  ./$BB_APP_IMAGE --appimage-extract >/dev/null 2>&1 || true
-  if [ -d "squashfs-root" ]; then
-    rm -rf "$BB_EXTRACTED_DIR" >/dev/null 2>&1 || true
-    mv squashfs-root "$BB_EXTRACTED_DIR"
-    echo "Extracted BlockBench to ./$BB_EXTRACTED_DIR"
-  fi
-fi
-
-echo "BlockBench setup complete."
+echo "Setup complete."

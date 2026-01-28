@@ -74319,160 +74319,139 @@ const git_1 = __nccwpck_require__(71243);
 async function getPuppeteer() {
     return await Promise.resolve().then(() => __importStar(__nccwpck_require__(15101)));
 }
-const BB_VERSION = '4.11.0';
-const BB_APP_IMAGE = (/* unused pure expression or super */ null && (`Blockbench_${BB_VERSION}.AppImage`));
-const BB_EXTRACTED_DIR = 'Blockbench_extracted';
-const REMOTE_DEBUG_PORT = 9222;
-async function setupBlockbench() {
-    core.info('Setting up BlockBench...');
-    const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
-    await exec.exec('bash', [scriptPath]);
-}
+const BLOCKBENCH_WEB_URL = 'https://web.blockbench.net/';
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
-async function renderModelWithPuppeteer(bbmodelPath, outputPath, extractedDir) {
-    const appRunPath = path.join(extractedDir, 'AppRun');
-    // Start Blockbench with remote debugging enabled
-    core.info(`Starting Blockbench with remote debugging on port ${REMOTE_DEBUG_PORT}...`);
-    const env = {
-        ...process.env,
-        APPDIR: extractedDir,
-        LD_LIBRARY_PATH: `${extractedDir}:${extractedDir}/usr/lib:${process.env.LD_LIBRARY_PATH || ''}`,
-        DISPLAY: process.env.DISPLAY || ':99',
-        ELECTRON_NO_UPDATER: '1',
-    };
-    // Start xvfb first if not running
-    const xvfbCheck = await exec.getExecOutput('pgrep', ['-x', 'Xvfb'], { ignoreReturnCode: true });
-    if (xvfbCheck.exitCode !== 0) {
-        core.info('Starting Xvfb...');
-        exec.exec('Xvfb', [':99', '-screen', '0', '1280x720x24'], {
-            env,
-            silent: true,
-        }).catch(() => { }); // Run in background
-        await sleep(1000);
-    }
-    // Start Blockbench with remote debugging
-    const blockbenchArgs = [
-        `--remote-debugging-port=${REMOTE_DEBUG_PORT}`,
-        '--no-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--disable-background-networking',
-        '--disable-component-update',
+/**
+ * Find Chrome/Chromium executable on the system
+ */
+async function findChromePath() {
+    // Common Chrome paths on different systems
+    const possiblePaths = [
+        // Linux (GitHub Actions runners have Chrome pre-installed)
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        // macOS
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
     ];
-    core.info(`Launching Blockbench: ${appRunPath} ${blockbenchArgs.join(' ')}`);
-    const blockbenchProcess = exec.exec(appRunPath, blockbenchArgs, {
-        env,
-        cwd: extractedDir,
-        silent: true,
-    }).catch((e) => {
-        core.warning(`Blockbench process error: ${e}`);
-    });
-    // Wait for Blockbench to start and remote debugging to be available
-    core.info('Waiting for Blockbench to start...');
-    const puppeteer = await getPuppeteer();
-    let browser = null;
-    let attempts = 0;
-    const maxAttempts = 30;
-    while (attempts < maxAttempts) {
+    for (const p of possiblePaths) {
         try {
-            await sleep(2000);
-            browser = await puppeteer.connect({
-                browserURL: `http://127.0.0.1:${REMOTE_DEBUG_PORT}`,
-            });
-            core.info('Connected to Blockbench via Puppeteer');
-            break;
+            await fs.access(p);
+            return p;
         }
-        catch (e) {
-            attempts++;
-            if (attempts >= maxAttempts) {
-                core.warning(`Failed to connect to Blockbench after ${maxAttempts} attempts`);
-                return false;
-            }
+        catch {
+            // Try next path
         }
     }
-    if (!browser) {
-        return false;
-    }
+    // Try using 'which' command
     try {
-        // Wait for Blockbench to fully initialize and find the right page
-        core.info('Waiting for Blockbench to fully initialize...');
-        let page = null;
-        let blockbenchReady = false;
-        // Poll for up to 30 seconds for Blockbench to be ready
-        for (let attempt = 0; attempt < 15; attempt++) {
-            await sleep(2000);
-            const pages = await browser.pages();
-            core.info(`Found ${pages.length} page(s), checking for Blockbench...`);
-            for (const p of pages) {
-                try {
-                    const hasBlockbench = await p.evaluate(() => {
-                        const win = window;
-                        return typeof win.Blockbench !== 'undefined' &&
-                            typeof win.Codecs !== 'undefined' &&
-                            typeof win.Formats !== 'undefined';
-                    });
-                    if (hasBlockbench) {
-                        page = p;
-                        blockbenchReady = true;
-                        core.info('Found Blockbench on page: ' + p.url());
-                        break;
-                    }
-                }
-                catch (e) {
-                    // Page might not be ready yet
-                }
-            }
-            if (blockbenchReady)
-                break;
-            core.info(`Attempt ${attempt + 1}/15: Blockbench not ready yet...`);
+        const result = await exec.getExecOutput('which', ['google-chrome'], { ignoreReturnCode: true });
+        if (result.exitCode === 0 && result.stdout.trim()) {
+            return result.stdout.trim();
         }
-        if (!page || !blockbenchReady) {
-            core.warning('Blockbench did not initialize in time');
-            return false;
+    }
+    catch { }
+    try {
+        const result = await exec.getExecOutput('which', ['chromium-browser'], { ignoreReturnCode: true });
+        if (result.exitCode === 0 && result.stdout.trim()) {
+            return result.stdout.trim();
         }
+    }
+    catch { }
+    throw new Error('Chrome/Chromium not found. Please ensure Google Chrome or Chromium is installed.');
+}
+/**
+ * Render a bbmodel file using Blockbench's web version
+ */
+async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
+    let page = null;
+    try {
+        // Create a new page for this render
+        page = await browser.newPage();
+        // Set viewport to ensure consistent canvas size
+        await page.setViewport({ width: 1280, height: 720 });
+        core.info('Loading Blockbench web...');
+        await page.goto(BLOCKBENCH_WEB_URL, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+        // Wait for Blockbench to fully load
+        core.info('Waiting for Blockbench to initialize...');
+        await page.waitForFunction(() => {
+            const win = window;
+            return typeof win.Blockbench !== 'undefined' &&
+                typeof win.Codecs !== 'undefined' &&
+                typeof win.Formats !== 'undefined';
+        }, { timeout: 30000 });
+        core.info('Blockbench web loaded successfully');
         // Read the bbmodel file content
         const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
-        // Use Blockbench's API to load the model and render
+        // Load the model and render
         core.info('Loading model via Blockbench API...');
-        // The evaluate callback runs in the browser context where Blockbench globals exist
         const result = await page.evaluate(async (modelJson) => {
             try {
-                // Access Blockbench globals via window to avoid TypeScript errors
                 const win = window;
-                // Wait for Blockbench to be ready
-                if (typeof win.Blockbench === 'undefined') {
-                    return { success: false, error: 'Blockbench not loaded' };
+                // Parse our bbmodel JSON
+                const bbmodel = JSON.parse(modelJson);
+                // Verify Blockbench is ready
+                if (!win.Codecs?.bedrock?.parse) {
+                    return { success: false, error: 'Codecs.bedrock.parse not available' };
                 }
-                // Parse and load the model
-                const modelData = JSON.parse(modelJson);
-                // Create a new project
-                if (typeof win.newProject === 'function' && win.Formats) {
-                    win.newProject(win.Formats.bedrock);
+                if (!win.newProject || !win.Formats?.bedrock) {
+                    return { success: false, error: 'Formats.bedrock not available' };
                 }
-                // Try to load the model using Codec
-                if (win.Codecs) {
-                    const codec = win.Codecs.project || win.Codecs.bedrock;
-                    if (codec && codec.parse) {
-                        codec.parse(modelData);
-                    }
+                // Create a new Bedrock project first
+                win.newProject(win.Formats.bedrock);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                // Convert our bbmodel format to proper Bedrock geometry format
+                // Our bbmodel has Bedrock bones in the 'elements' array
+                const bedrockGeo = {
+                    format_version: '1.12.0',
+                    'minecraft:geometry': [{
+                            description: {
+                                identifier: `geometry.${bbmodel.name || 'model'}`,
+                                texture_width: bbmodel.resolution?.width || 16,
+                                texture_height: bbmodel.resolution?.height || 16,
+                            },
+                            bones: bbmodel.elements || []
+                        }]
+                };
+                // Use the bedrock codec to parse the geometry
+                win.Codecs.bedrock.parse(bedrockGeo);
+                // Wait for render to complete
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                // Try to center/fit the model in view
+                if (win.Canvas?.center) {
+                    win.Canvas.center();
                 }
-                // Wait for render
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                // Wait a bit more after centering
+                await new Promise(resolve => setTimeout(resolve, 500));
                 // Get the preview canvas
                 const canvas = document.querySelector('#preview canvas');
                 if (!canvas) {
-                    return { success: false, error: 'Canvas not found' };
+                    return { success: false, error: 'Preview canvas not found' };
                 }
                 // Get the image data
                 const dataUrl = canvas.toDataURL('image/png');
-                return { success: true, dataUrl };
+                // Verify we got actual image data
+                if (dataUrl.length < 1000) {
+                    return { success: false, error: `Canvas data too small (${dataUrl.length} chars)` };
+                }
+                // Report element count for debugging
+                const elementCount = win.Outliner?.elements?.length || 0;
+                return { success: true, dataUrl, elementCount };
             }
             catch (e) {
                 return { success: false, error: e.message || String(e) };
             }
         }, bbmodelContent);
+        if (result.elementCount !== undefined) {
+            core.info(`Loaded ${result.elementCount} elements`);
+        }
         if (!result.success) {
             core.warning(`Blockbench render failed: ${result.error}`);
             return false;
@@ -74487,16 +74466,14 @@ async function renderModelWithPuppeteer(bbmodelPath, outputPath, extractedDir) {
         return false;
     }
     catch (e) {
-        core.warning(`Puppeteer render error: ${e}`);
+        core.warning(`Render error: ${e}`);
         return false;
     }
     finally {
-        // Disconnect (don't close, let the process handle it)
-        if (browser) {
-            await browser.disconnect();
+        // Close the page to clean up
+        if (page) {
+            await page.close().catch(() => { });
         }
-        // Kill Blockbench
-        await exec.exec('pkill', ['-f', 'blockbench'], { ignoreReturnCode: true });
     }
 }
 async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha) {
@@ -74504,96 +74481,104 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
     core.info('Starting rendering process...');
-    await setupBlockbench();
+    // Find Chrome/Chromium
+    const chromePath = await findChromePath();
+    core.info(`Using Chrome at: ${chromePath}`);
+    // Launch browser once and reuse for all renders
+    const puppeteer = await getPuppeteer();
+    const browser = await puppeteer.launch({
+        executablePath: chromePath,
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--headless=new',
+        ],
+    });
+    core.info('Browser launched');
     const tempDir = path.join(process.cwd(), 'temp-render');
     await io.mkdirP(tempDir);
     core.info(`Created temporary directory for rendering at ${tempDir}`);
-    // Determine Blockbench executable path (prefer extracted AppRun)
-    const extractedDir = path.join(process.cwd(), BB_EXTRACTED_DIR);
-    const extractedAppRunPath = path.join(extractedDir, 'AppRun');
     try {
-        await fs.access(extractedAppRunPath);
-        await fs.chmod(extractedAppRunPath, 0o755);
-        core.info(`Using extracted Blockbench executable at ${extractedAppRunPath}`);
-    }
-    catch {
-        core.warning('Blockbench AppRun not found');
-    }
-    // Generate "before" models (already on base branch from main.ts)
-    core.info(`Generating base models (on ${baseRef})...`);
-    for (const entity of baseEntities) {
-        try {
-            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
-            const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
-            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-            core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
-        }
-        catch (error) {
-            core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
-        }
-    }
-    // Generate "after" models (checkout back to original HEAD SHA)
-    core.info(`Checking out HEAD (${headSha}) to generate head models...`);
-    await (0, git_1.checkout)(headSha);
-    for (const entity of prEntities) {
-        try {
-            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
-            const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
-            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-            core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
-        }
-        catch (error) {
-            core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
-        }
-    }
-    // Render the models using Puppeteer
-    core.info('Rendering models with BlockBench via Puppeteer...');
-    const filesToRender = await fs.readdir(tempDir);
-    for (const file of filesToRender) {
-        if (file.endsWith('.bbmodel')) {
-            const modelPath = path.join(tempDir, file);
-            const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
-            const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
-            const variant = variantMatch ? variantMatch[1] : 'render';
-            const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
-            const outputPath = path.join(tempDir, safeBaseName);
-            core.info(`Rendering: ${modelPath} -> ${outputPath}`);
-            const success = await renderModelWithPuppeteer(modelPath, outputPath, extractedDir);
-            if (success) {
-                core.info(`Successfully rendered ${file}`);
+        // Generate "before" models (already on base branch from main.ts)
+        core.info(`Generating base models (on ${baseRef})...`);
+        for (const entity of baseEntities) {
+            try {
+                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+                const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
+                await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+                core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
             }
-            else {
-                core.warning(`Failed to render ${file}`);
+            catch (error) {
+                core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
             }
         }
-    }
-    // List files in temp dir for debugging
-    try {
+        // Generate "after" models (checkout back to original HEAD SHA)
+        core.info(`Checking out HEAD (${headSha}) to generate head models...`);
+        await (0, git_1.checkout)(headSha);
+        for (const entity of prEntities) {
+            try {
+                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+                const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
+                await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+                core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+            }
+            catch (error) {
+                core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
+            }
+        }
+        // Render the models using Blockbench web
+        core.info('Rendering models with Blockbench web...');
+        const filesToRender = await fs.readdir(tempDir);
+        for (const file of filesToRender) {
+            if (file.endsWith('.bbmodel')) {
+                const modelPath = path.join(tempDir, file);
+                const identifierPart = file.replace(/\.(head|base)\.bbmodel$/, '');
+                const variantMatch = file.match(/\.(head|base)\.bbmodel$/);
+                const variant = variantMatch ? variantMatch[1] : 'render';
+                const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
+                const outputPath = path.join(tempDir, safeBaseName);
+                core.info(`Rendering: ${modelPath} -> ${outputPath}`);
+                const success = await renderModelWithBlockbenchWeb(modelPath, outputPath, browser);
+                if (success) {
+                    core.info(`Successfully rendered ${file}`);
+                }
+                else {
+                    core.warning(`Failed to render ${file}`);
+                }
+            }
+        }
+        // List files in temp dir for debugging
         const listAfter = await fs.readdir(tempDir);
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+        const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
+        core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
+        const structuredUrls = prEntities.map((entity) => {
+            const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
+            const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
+            const safeId = toSafeFilename(entity.identifier);
+            const safeBase = path.join(tempDir, `${safeId}.base.png`);
+            const safeHead = path.join(tempDir, `${safeId}.head.png`);
+            const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
+            const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+            core.info(`URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
+            return {
+                identifier: entity.identifier,
+                base: baseUrl,
+                head: headUrl,
+            };
+        });
+        // Filter out rows where both images are missing
+        const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
+        await (0, comment_1.postComment)(nonEmptyRows);
+        core.info('Rendering process complete.');
     }
-    catch { }
-    const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
-    core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
-    const structuredUrls = prEntities.map((entity) => {
-        const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
-        const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
-        const safeId = toSafeFilename(entity.identifier);
-        const safeBase = path.join(tempDir, `${safeId}.base.png`);
-        const safeHead = path.join(tempDir, `${safeId}.head.png`);
-        const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
-        const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
-        core.info(`URL mapping for ${entity.identifier}: base(${originalBase} | ${safeBase}) => ${baseUrl || '[missing]'}, head(${originalHead} | ${safeHead}) => ${headUrl || '[missing]'}`);
-        return {
-            identifier: entity.identifier,
-            base: baseUrl,
-            head: headUrl,
-        };
-    });
-    // Filter out rows where both images are missing to avoid empty <img src="">
-    const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
-    await (0, comment_1.postComment)(nonEmptyRows);
-    core.info('Rendering process complete.');
+    finally {
+        // Close the browser
+        await browser.close();
+    }
 }
 
 
