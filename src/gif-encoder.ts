@@ -1,12 +1,11 @@
 /**
  * GIF encoder for animation previews
- * Uses gif-encoder-2 for reliable GIF generation
+ * Uses browser-based GIF encoding via Puppeteer for cross-platform compatibility
  */
 
 import * as core from '@actions/core';
 import * as fs from 'fs/promises';
-import { createCanvas, loadImage } from 'canvas';
-import GIFEncoder from 'gif-encoder-2';
+import type { Browser, Page } from 'puppeteer-core';
 
 // GIF encoding configuration
 export const GIF_CONFIG = {
@@ -42,13 +41,87 @@ export function calculateFrameTimestamps(duration: number): number[] {
   return timestamps;
 }
 
+// HTML page for GIF encoding using gif.js
+const GIF_ENCODER_HTML = `<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+</head>
+<body>
+  <canvas id="canvas" style="display:none;"></canvas>
+  <script>
+    window.encodeGIF = function(frameDataUrls, width, height, delay) {
+      return new Promise((resolve, reject) => {
+        const gif = new GIF({
+          workers: 2,
+          quality: 10,
+          width: width,
+          height: height,
+          workerScript: 'https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js'
+        });
+        
+        const canvas = document.getElementById('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        
+        let loadedFrames = 0;
+        const images = [];
+        
+        // Load all images first
+        for (let i = 0; i < frameDataUrls.length; i++) {
+          const img = new Image();
+          img.onload = function() {
+            images[i] = img;
+            loadedFrames++;
+            if (loadedFrames === frameDataUrls.length) {
+              // All images loaded, add frames to GIF
+              for (let j = 0; j < images.length; j++) {
+                ctx.fillStyle = '#2d2d2d';
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(images[j], 0, 0, width, height);
+                gif.addFrame(ctx, { copy: true, delay: delay });
+              }
+              gif.render();
+            }
+          };
+          img.onerror = function() {
+            reject(new Error('Failed to load frame ' + i));
+          };
+          img.src = frameDataUrls[i];
+        }
+        
+        gif.on('finished', function(blob) {
+          const reader = new FileReader();
+          reader.onload = function() {
+            const base64 = reader.result.split(',')[1];
+            resolve(base64);
+          };
+          reader.onerror = function() {
+            reject(new Error('Failed to read GIF blob'));
+          };
+          reader.readAsDataURL(blob);
+        });
+        
+        gif.on('error', function(err) {
+          reject(err);
+        });
+      });
+    };
+    
+    window.gifEncoderReady = true;
+  </script>
+</body>
+</html>`;
+
 /**
- * Create a GIF from an array of PNG frame buffers
+ * Create a GIF from an array of PNG frame buffers using browser-based encoding
  */
 export async function createGifFromFrames(
   frames: Buffer[],
   outputPath: string,
-  options: { width?: number; height?: number; delay?: number } = {}
+  options: { width?: number; height?: number; delay?: number } = {},
+  browser?: Browser
 ): Promise<boolean> {
   const { 
     width = GIF_CONFIG.width, 
@@ -56,50 +129,52 @@ export async function createGifFromFrames(
     delay = GIF_CONFIG.frameDelay 
   } = options;
 
+  if (frames.length === 0) {
+    core.warning('No frames provided for GIF creation');
+    return false;
+  }
+
+  // If no browser provided, we can't encode
+  if (!browser) {
+    core.warning('No browser provided for GIF encoding');
+    return false;
+  }
+
+  let page: Page | null = null;
+
   try {
-    if (frames.length === 0) {
-      core.warning('No frames provided for GIF creation');
+    // Convert frame buffers to data URLs
+    const frameDataUrls = frames.map(buffer => 
+      `data:image/png;base64,${buffer.toString('base64')}`
+    );
+
+    // Create a new page for GIF encoding
+    page = await browser.newPage();
+    await page.setContent(GIF_ENCODER_HTML, { waitUntil: 'networkidle0' });
+    
+    // Wait for gif.js to load
+    await page.waitForFunction(() => (window as any).gifEncoderReady === true, { timeout: 30000 });
+    
+    core.info(`Encoding ${frames.length} frames into GIF...`);
+    
+    // Encode the GIF
+    const base64Gif = await page.evaluate(
+      async (dataUrls: string[], w: number, h: number, d: number) => {
+        return await (window as any).encodeGIF(dataUrls, w, h, d);
+      },
+      frameDataUrls,
+      width,
+      height,
+      delay
+    );
+    
+    if (!base64Gif) {
+      core.warning('GIF encoding returned empty result');
       return false;
     }
-
-    // Create encoder
-    const encoder = new GIFEncoder(width, height, 'neuquant', true);
     
-    // Configure encoder
-    encoder.setDelay(delay);
-    encoder.setRepeat(GIF_CONFIG.repeat);
-    encoder.setQuality(GIF_CONFIG.quality);
-    
-    // Start encoding
-    encoder.start();
-
-    // Create a canvas for drawing frames
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-
-    // Add each frame
-    for (let i = 0; i < frames.length; i++) {
-      try {
-        // Load the PNG buffer as an image
-        const img = await loadImage(frames[i]);
-        
-        // Clear canvas and draw image
-        ctx.fillStyle = '#2d2d2d'; // Match the render background
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-        
-        // Add frame to GIF
-        encoder.addFrame(ctx);
-      } catch (frameError) {
-        core.warning(`Failed to add frame ${i}: ${frameError}`);
-      }
-    }
-
-    // Finish encoding
-    encoder.finish();
-
-    // Get the GIF buffer and write to file
-    const gifBuffer = encoder.out.getData();
+    // Write the GIF to file
+    const gifBuffer = Buffer.from(base64Gif, 'base64');
     await fs.writeFile(outputPath, gifBuffer);
     
     core.info(`Created GIF at ${outputPath} (${frames.length} frames, ${gifBuffer.length} bytes)`);
@@ -107,5 +182,9 @@ export async function createGifFromFrames(
   } catch (error) {
     core.warning(`Failed to create GIF: ${error}`);
     return false;
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
   }
 }
