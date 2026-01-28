@@ -109,18 +109,47 @@ async function renderModelWithPuppeteer(
   }
 
   try {
-    // Get the main page (Blockbench window)
-    const pages = await browser.pages();
-    if (pages.length === 0) {
-      core.warning('No pages found in Blockbench');
-      return false;
+    // Wait for Blockbench to fully initialize and find the right page
+    core.info('Waiting for Blockbench to fully initialize...');
+    
+    let page: Page | null = null;
+    let blockbenchReady = false;
+    
+    // Poll for up to 30 seconds for Blockbench to be ready
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await sleep(2000);
+      
+      const pages = await browser.pages();
+      core.info(`Found ${pages.length} page(s), checking for Blockbench...`);
+      
+      for (const p of pages) {
+        try {
+          const hasBlockbench = await p.evaluate(() => {
+            const win = window as any;
+            return typeof win.Blockbench !== 'undefined' && 
+                   typeof win.Codecs !== 'undefined' &&
+                   typeof win.Formats !== 'undefined';
+          });
+          
+          if (hasBlockbench) {
+            page = p;
+            blockbenchReady = true;
+            core.info('Found Blockbench on page: ' + p.url());
+            break;
+          }
+        } catch (e) {
+          // Page might not be ready yet
+        }
+      }
+      
+      if (blockbenchReady) break;
+      core.info(`Attempt ${attempt + 1}/15: Blockbench not ready yet...`);
     }
     
-    const page = pages[0];
-    core.info(`Found ${pages.length} page(s), using first one`);
-
-    // Wait for Blockbench to fully load
-    await sleep(3000);
+    if (!page || !blockbenchReady) {
+      core.warning('Blockbench did not initialize in time');
+      return false;
+    }
 
     // Read the bbmodel file content
     const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
