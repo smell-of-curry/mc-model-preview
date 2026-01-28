@@ -189,6 +189,15 @@ async function renderModelWithBlockbenchWeb(
     // Read the bbmodel file content
     const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
     
+    // Wait for the preview canvas to exist before loading any model
+    core.info('Waiting for preview canvas...');
+    try {
+      await page.waitForSelector('#preview canvas', { timeout: 10000 });
+      core.info('Preview canvas found');
+    } catch {
+      core.warning('Preview canvas not found after 10s - 3D preview may not be initialized');
+    }
+    
     // Load the model and render
     core.info('Loading model via Blockbench API...');
     
@@ -196,77 +205,94 @@ async function renderModelWithBlockbenchWeb(
       try {
         const win = window as any;
         
-        // Parse our bbmodel JSON (this is a native Blockbench project format)
-        const bbmodel = JSON.parse(modelJson);
-        
-        // Try to load directly as a bbmodel project file
-        // This avoids the complex bedrock codec initialization
-        if (win.Codecs?.project?.load) {
-          try {
-            win.Codecs.project.load(bbmodel, { path: 'model.bbmodel' });
-          } catch (projectErr: any) {
-            console.warn('project.load failed, trying bedrock codec:', projectErr?.message);
-            // Fall back to bedrock codec if project codec fails
-            const bedrockGeo = {
-              format_version: '1.12.0',
-              'minecraft:geometry': [{
-                description: {
-                  identifier: `geometry.${bbmodel.name || 'model'}`,
-                  texture_width: bbmodel.resolution?.width || 16,
-                  texture_height: bbmodel.resolution?.height || 16,
-                },
-                bones: bbmodel.elements || []
-              }]
-            };
-            if (win.Codecs?.bedrock?.load) {
-              win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
+        // First, check if preview canvas exists
+        const previewCanvas = document.querySelector('#preview canvas');
+        if (!previewCanvas) {
+          // Try to manually initialize preview if possible
+          if (win.Preview && win.Preview.all && win.Preview.all.length === 0) {
+            // No previews exist, try to create one
+            try {
+              new win.Preview({ id: 'main' });
+            } catch (e) {
+              console.warn('Could not create Preview:', e);
             }
           }
-        } else if (win.Codecs?.bedrock?.load) {
-          // Fallback: Build proper Bedrock geometry format
-          const bedrockGeo = {
-            format_version: '1.12.0',
-            'minecraft:geometry': [{
-              description: {
-                identifier: `geometry.${bbmodel.name || 'model'}`,
-                texture_width: bbmodel.resolution?.width || 16,
-                texture_height: bbmodel.resolution?.height || 16,
-              },
-              bones: bbmodel.elements || []
-            }]
-          };
-          win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
+        }
+        
+        // Parse our bbmodel JSON
+        const bbmodel = JSON.parse(modelJson);
+        
+        // Build proper Bedrock geometry format from our bbmodel
+        const bedrockGeo = {
+          format_version: '1.12.0',
+          'minecraft:geometry': [{
+            description: {
+              identifier: `geometry.${bbmodel.name || 'model'}`,
+              texture_width: bbmodel.resolution?.width || 16,
+              texture_height: bbmodel.resolution?.height || 16,
+            },
+            bones: bbmodel.elements || []
+          }]
+        };
+        
+        // Try to load using bedrock codec with error catching
+        let loadError: string | null = null;
+        if (win.Codecs?.bedrock?.load) {
+          try {
+            win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
+          } catch (e: any) {
+            loadError = e?.message || String(e);
+            console.warn('Codec load error:', loadError);
+          }
         } else {
-          return { success: false, error: 'No suitable codec available' };
+          return { success: false, error: 'Codecs.bedrock.load not available' };
         }
         
         // Wait for model to load and render
         await new Promise(resolve => setTimeout(resolve, 2000));
         
         // Try to center/fit the model in view
-        if (win.Canvas?.center) {
-          win.Canvas.center();
+        try {
+          if (win.Canvas?.center) {
+            win.Canvas.center();
+          }
+        } catch (e) {
+          console.warn('Canvas.center error:', e);
         }
         await new Promise(resolve => setTimeout(resolve, 500));
         
         // Get the preview canvas
         const canvas = document.querySelector('#preview canvas') as HTMLCanvasElement;
         if (!canvas) {
-          return { success: false, error: 'Preview canvas not found' };
+          return { 
+            success: false, 
+            error: 'Preview canvas not found after model load',
+            loadError,
+            previewCount: win.Preview?.all?.length || 0
+          };
         }
         
         // Get the image data
-        const dataUrl = canvas.toDataURL('image/png');
+        let dataUrl: string;
+        try {
+          dataUrl = canvas.toDataURL('image/png');
+        } catch (e: any) {
+          return { success: false, error: `Failed to get canvas data: ${e?.message}` };
+        }
         
         // Verify we got actual image data
         if (dataUrl.length < 1000) {
-          return { success: false, error: `Canvas data too small (${dataUrl.length} chars) - model may not have loaded` };
+          return { 
+            success: false, 
+            error: `Canvas data too small (${dataUrl.length} chars) - model may not have rendered`,
+            loadError
+          };
         }
         
         // Report element count for debugging
         const elementCount = win.Outliner?.elements?.length || 0;
         
-        return { success: true, dataUrl, elementCount };
+        return { success: true, dataUrl, elementCount, loadError };
       } catch (e: any) {
         return { success: false, error: e.message || String(e) };
       }
