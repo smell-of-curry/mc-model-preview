@@ -3,7 +3,7 @@ import * as github from '@actions/github';
 import * as path from 'path';
 import { parseResourcePack } from './parser';
 import { getChangedFiles, findAffectedEntities } from './differ'; // We'll need to split differ
-import { checkout } from './git';
+import { checkout, getHeadSha } from './git';
 import { renderChanges } from './renderer';
 import { Entity } from './types';
 
@@ -55,7 +55,11 @@ async function run(): Promise<void> {
         .join(', ')}`
     );
 
-    // 2. Checkout base branch and parse
+    // 2. Store HEAD SHA before any checkouts (needed for PR merge refs)
+    const headSha = await getHeadSha();
+    core.info(`Stored HEAD SHA: ${headSha}`);
+
+    // 3. Checkout base branch and parse
     core.info(`Checking out base branch: ${baseRef}`);
     await checkout(baseRef);
     const baseEntities = await parseResourcePack(resourcePackPath);
@@ -66,12 +70,13 @@ async function run(): Promise<void> {
       affectedEntityIds.includes(e.identifier)
     );
 
-    // Render changes - pass base ref for checkout (HEAD SHA is captured internally)
+    // Render changes - pass base ref and head SHA for checkouts
     await renderChanges(
       affectedBaseEntities,
       affectedHeadEntities,
       resourcePackPath,
-      baseRef
+      baseRef,
+      headSha
     );
 
     core.info('Action completed successfully.');

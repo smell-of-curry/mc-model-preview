@@ -32963,15 +32963,18 @@ async function run() {
         core.info(`Found ${affectedHeadEntities.length} affected entities on HEAD (${headRef}): ${affectedHeadEntities
             .map((e) => e.identifier)
             .join(', ')}`);
-        // 2. Checkout base branch and parse
+        // 2. Store HEAD SHA before any checkouts (needed for PR merge refs)
+        const headSha = await (0, git_1.getHeadSha)();
+        core.info(`Stored HEAD SHA: ${headSha}`);
+        // 3. Checkout base branch and parse
         core.info(`Checking out base branch: ${baseRef}`);
         await (0, git_1.checkout)(baseRef);
         const baseEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
         // Filter base entities to only include those affected in the PR
         const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
         const affectedBaseEntities = baseEntities.filter((e) => affectedEntityIds.includes(e.identifier));
-        // Render changes - pass base ref for checkout (HEAD SHA is captured internally)
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef);
+        // Render changes - pass base ref and head SHA for checkouts
+        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef, headSha);
         core.info('Action completed successfully.');
     }
     catch (error) {
@@ -33271,7 +33274,7 @@ async function setupBlockbench() {
     const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
     await exec.exec('bash', [scriptPath]);
 }
-async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef) {
+async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha) {
     const toSafeFilename = (name) => {
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
@@ -33298,12 +33301,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         bbExecutable = appImagePath;
         core.info(`Using AppImage at ${appImagePath}`);
     }
-    // Store the current HEAD SHA before any checkouts (needed for PR merge refs)
-    const headSha = await (0, git_1.getHeadSha)();
-    core.info(`Stored HEAD SHA: ${headSha}`);
-    // Generate "before" models (checkout base branch first)
-    core.info(`Checking out base branch (${baseRef}) to generate base models...`);
-    await (0, git_1.checkout)(baseRef);
+    // Generate "before" models (already on base branch from main.ts)
+    core.info(`Generating base models (on ${baseRef})...`);
     for (const entity of baseEntities) {
         try {
             const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
