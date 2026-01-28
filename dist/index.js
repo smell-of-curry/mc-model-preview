@@ -73477,6 +73477,14 @@ exports.isAnimationLooping = isAnimationLooping;
  * - Basic arithmetic operators
  */
 function evaluateMolang(expression, animTime) {
+    // If it's already a number, return it directly
+    if (typeof expression === 'number') {
+        return expression;
+    }
+    // If it's not a string, return 0
+    if (typeof expression !== 'string') {
+        return 0;
+    }
     // Replace Molang variables
     let expr = expression
         .replace(/q\.anim_time/g, String(animTime))
@@ -73517,17 +73525,17 @@ function evaluateMolang(expression, animTime) {
 function parseAnimationValue(value, animTime, defaultValue = [0, 0, 0]) {
     if (value === undefined)
         return defaultValue;
-    // Static array value [x, y, z]
-    if (Array.isArray(value) && typeof value[0] === 'number') {
-        return value;
-    }
     // Molang string expression (single string for all components - unusual but possible)
     if (typeof value === 'string') {
         const result = evaluateMolang(value, animTime);
         return [result, result, result];
     }
-    // Array of Molang strings [x_expr, y_expr, z_expr]
-    if (Array.isArray(value) && typeof value[0] === 'string') {
+    // Array value - can be all numbers, all strings, or mixed (strings and numbers)
+    // Examples:
+    //   [0, 0, 0] - all numbers
+    //   ["expr", "expr", "expr"] - all Molang strings
+    //   ["-0-math.cos(...)", 0, "0+math.cos(...)"] - mixed
+    if (Array.isArray(value) && value.length >= 3) {
         return [
             evaluateMolang(value[0], animTime),
             evaluateMolang(value[1], animTime),
