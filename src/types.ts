@@ -21,6 +21,7 @@ export interface Entity {
   entityFilePath: string;
   geometryFiles: string[];
   textureFiles: string[];
+  textureMap: Record<string, string>; // key -> path mapping for textures
   animationFiles: string[];
   materialFiles: string[];
 }

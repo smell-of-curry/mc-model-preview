@@ -145,6 +145,7 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
         entityFilePath: path.relative(resourcePackPath, file),
         geometryFiles: [],
         textureFiles: [],
+        textureMap: {},
         animationFiles: [],
         materialFiles: [],
       };
@@ -165,6 +166,7 @@ export async function parseResourcePack(resourcePackPath: string): Promise<Entit
           const texturePath = description.textures[key];
           if (typeof texturePath === 'string' && texturePath.length > 0) {
             entity.textureFiles.push(texturePath);
+            entity.textureMap[key] = texturePath;
           }
         }
       }

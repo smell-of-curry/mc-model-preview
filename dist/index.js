@@ -73520,15 +73520,55 @@ async function createBBFile(entity, resourcePackPath) {
     }
     const bedrockGeo = geoArray[0];
     // Load and process textures
+    // Prefer the "default" texture, then textures with proper paths
     const textures = [];
-    for (const textureFile of entity.textureFiles) {
-        const txPath = path.join(resourcePackPath, textureFile);
+    // Build prioritized texture list
+    const textureEntries = [];
+    // First priority: "default" texture
+    if (entity.textureMap['default']) {
+        textureEntries.push({ key: 'default', path: entity.textureMap['default'] });
+    }
+    // Second priority: textures with "default" in the key name
+    for (const [key, texPath] of Object.entries(entity.textureMap)) {
+        if (key !== 'default' && key.includes('default')) {
+            textureEntries.push({ key, path: texPath });
+        }
+    }
+    // Third priority: other textures sorted by quality
+    const otherTextures = Object.entries(entity.textureMap)
+        .filter(([key]) => key !== 'default' && !key.includes('default'))
+        .sort(([, a], [, b]) => {
+        // Prefer textures with .png extension
+        const aHasExt = a.endsWith('.png') || a.endsWith('.jpg');
+        const bHasExt = b.endsWith('.png') || b.endsWith('.jpg');
+        if (aHasExt && !bHasExt)
+            return -1;
+        if (!aHasExt && bHasExt)
+            return 1;
+        // Prefer textures in entity/pokemon folder
+        const aIsPokemon = a.includes('entity/pokemon');
+        const bIsPokemon = b.includes('entity/pokemon');
+        if (aIsPokemon && !bIsPokemon)
+            return -1;
+        if (!aIsPokemon && bIsPokemon)
+            return 1;
+        return 0;
+    });
+    for (const [key, texPath] of otherTextures) {
+        textureEntries.push({ key, path: texPath });
+    }
+    for (const { key, path: textureFile } of textureEntries) {
+        let txPath = path.join(resourcePackPath, textureFile);
+        // If path doesn't have extension, try adding .png
+        if (!textureFile.endsWith('.png') && !textureFile.endsWith('.jpg')) {
+            txPath = path.join(resourcePackPath, textureFile + '.png');
+        }
         textures.push({
             path: txPath,
             name: path.basename(textureFile),
             folder: '',
             namespace: '',
-            id: path.basename(textureFile, path.extname(textureFile)),
+            id: key,
             particle: false,
             render_mode: 'normal',
             frame_time: 1,
@@ -73557,6 +73597,9 @@ async function createBBFile(entity, resourcePackPath) {
             });
         }
     }
+    // Get texture resolution from geometry description
+    const textureWidth = bedrockGeo.description?.texture_width || 64;
+    const textureHeight = bedrockGeo.description?.texture_height || 64;
     // Construct the BBModel object
     const bbModel = {
         meta: {
@@ -73565,7 +73608,7 @@ async function createBBFile(entity, resourcePackPath) {
             box_uv: false,
         },
         name: entity.identifier,
-        resolution: { width: 16, height: 16 }, // Default texture size
+        resolution: { width: textureWidth, height: textureHeight },
         elements: bedrockGeo.bones || [],
         outliner: [], // Simplified for now
         textures,
@@ -74217,6 +74260,7 @@ async function parseResourcePack(resourcePackPath) {
                 entityFilePath: path.relative(resourcePackPath, file),
                 geometryFiles: [],
                 textureFiles: [],
+                textureMap: {},
                 animationFiles: [],
                 materialFiles: [],
             };
@@ -74235,6 +74279,7 @@ async function parseResourcePack(resourcePackPath) {
                     const texturePath = description.textures[key];
                     if (typeof texturePath === 'string' && texturePath.length > 0) {
                         entity.textureFiles.push(texturePath);
+                        entity.textureMap[key] = texturePath;
                     }
                 }
             }
