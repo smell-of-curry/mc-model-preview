@@ -74401,11 +74401,12 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
                 if (!win.Codecs?.bedrock?.parse) {
                     return { success: false, error: 'Codecs.bedrock.parse not available' };
                 }
-                if (!win.newProject || !win.Formats?.bedrock) {
-                    return { success: false, error: 'Formats.bedrock not available' };
+                if (!win.Formats?.bedrock?.new) {
+                    return { success: false, error: 'Formats.bedrock.new not available' };
                 }
-                // Create a new Bedrock project first
-                win.newProject(win.Formats.bedrock);
+                // Create a new Bedrock project using the format's new() method
+                // (newProject() doesn't work in web version due to missing new_tab)
+                win.Formats.bedrock.new();
                 await new Promise(resolve => setTimeout(resolve, 500));
                 // Convert our bbmodel format to proper Bedrock geometry format
                 // Our bbmodel has Bedrock bones in the 'elements' array
