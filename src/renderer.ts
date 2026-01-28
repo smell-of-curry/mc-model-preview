@@ -355,16 +355,21 @@ async function renderChangedAnimations(
   for (const entity of entities) {
     if (entity.animationFiles.length === 0) continue;
     
-    // Get all animations for this entity
+    // Extract entity name from identifier (e.g., "pokemon:ferroseed" -> "ferroseed")
+    const entityName = entity.identifier.split(':').pop() || entity.identifier;
+    
+    // Get all animations that belong to this entity (filter by animation ID pattern)
     const entityAnimations: Array<{ animId: string; animData: import('./types').BedrockAnimation }> = [];
     
     for (const [animId, info] of animationMap) {
-      if (info.entity.identifier === entity.identifier) {
+      // Only include animations that match this entity's name pattern
+      // e.g., "animation.ferroseed.ground_idle" matches entity "ferroseed"
+      if (info.entity.identifier === entity.identifier && animId.includes(`.${entityName}.`)) {
         entityAnimations.push({ animId, animData: info.animationData });
       }
     }
     
-    core.info(`Found ${entityAnimations.length} animations for ${entity.identifier}`);
+    core.info(`Found ${entityAnimations.length} animations for ${entity.identifier} (entity name: ${entityName})`);
     
     // Render each animation
     for (const { animId, animData } of entityAnimations) {
