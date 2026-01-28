@@ -80,6 +80,7 @@ async function run(): Promise<void> {
     );
 
     core.info('Action completed successfully.');
+    process.exit(0);
   } catch (error) {
     if (error instanceof Error) {
       core.setFailed(error.message);
