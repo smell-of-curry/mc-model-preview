@@ -92,10 +92,24 @@ async function renderModelWithBlockbenchWeb(
           const response = await fetch(url);
           let scriptContent = await response.text();
           
-          // Fix Interface.tab_bar.new_tab access where tab_bar is undefined
+                    // Fix Interface.tab_bar.new_tab access where tab_bar is undefined
           scriptContent = scriptContent.replace(
             /Interface\.tab_bar\.new_tab/g,
             '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})'
+          );
+          
+          // Fix color inheritance where parent might be undefined
+          // Pattern: inherit_parent_color.value&&(X.color=Y.color)
+          // The Y (parent) might be undefined
+          scriptContent = scriptContent.replace(
+            /inherit_parent_color\.value\s*&&\s*\((\w+)\.color\s*=\s*(\w+)\.color\)/g,
+            'inherit_parent_color?.value&&$2&&($1.color=$2.color)'
+          );
+          
+          // Fix direct parent.color access patterns
+          scriptContent = scriptContent.replace(
+            /(\w+)\.addTo\((\w+)\)\s*,\s*\1\.color\s*=\s*\2\.color/g,
+            '$1.addTo($2),$2&&($1.color=$2.color)'
           );
           
           request.respond({
