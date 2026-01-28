@@ -277,9 +277,13 @@ export async function renderChanges(
     );
     
     // Build animation URL sets from rendered GIFs
+    core.info(`Looking for animation GIF URLs. Available keys: ${Object.keys(publicUrls).join(', ')}`);
+    
     const animationUrlSets: AnimationUrlSet[] = animationUrls.map((anim) => {
       const gifPath = path.join(tempDir, anim.gifFilename);
       const gifUrl = publicUrls[gifPath] || '';
+      
+      core.info(`Animation GIF lookup: ${anim.gifFilename} -> path: ${gifPath} -> url: ${gifUrl || '[NOT FOUND]'}`);
       
       return {
         entityIdentifier: anim.entityIdentifier,
@@ -288,6 +292,8 @@ export async function renderChanges(
         isNew: anim.isNew,
       };
     }).filter((a) => a.gifUrl.length > 0);
+    
+    core.info(`Animation URL sets after filter: ${JSON.stringify(animationUrlSets)}`);
     
     await postComment(nonEmptyRows, animationUrlSets);
     

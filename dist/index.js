@@ -75572,9 +75572,11 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         // Filter out rows where both normal images are missing
         const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
         // Build animation URL sets from rendered GIFs
+        core.info(`Looking for animation GIF URLs. Available keys: ${Object.keys(publicUrls).join(', ')}`);
         const animationUrlSets = animationUrls.map((anim) => {
             const gifPath = path.join(tempDir, anim.gifFilename);
             const gifUrl = publicUrls[gifPath] || '';
+            core.info(`Animation GIF lookup: ${anim.gifFilename} -> path: ${gifPath} -> url: ${gifUrl || '[NOT FOUND]'}`);
             return {
                 entityIdentifier: anim.entityIdentifier,
                 animationIdentifier: anim.animationIdentifier,
@@ -75582,6 +75584,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 isNew: anim.isNew,
             };
         }).filter((a) => a.gifUrl.length > 0);
+        core.info(`Animation URL sets after filter: ${JSON.stringify(animationUrlSets)}`);
         await (0, comment_1.postComment)(nonEmptyRows, animationUrlSets);
         core.info('Rendering process complete.');
     }
