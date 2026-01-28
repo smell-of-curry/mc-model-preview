@@ -74370,7 +74370,25 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
     const chromePath = await findChromePath();
     core.info(`Using Chrome at: ${chromePath}`);
     // Launch browser once and reuse for all renders
+    // WebGL requires specific flags to work in headless mode
     const puppeteer = await getPuppeteer();
+    // Detect if running on Linux (CI environment)
+    const isLinux = process.platform === 'linux';
+    const webglArgs = isLinux
+        ? [
+            // Linux CI: Use SwiftShader for software WebGL rendering
+            '--use-gl=angle',
+            '--use-angle=swiftshader',
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+        ]
+        : [
+            // macOS/Windows: Use default ANGLE
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+            '--enable-gpu',
+            '--use-angle=default',
+        ];
     const browser = await puppeteer.launch({
         executablePath: chromePath,
         headless: true,
@@ -74378,8 +74396,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu',
             '--headless=new',
+            ...webglArgs,
         ],
     });
     core.info('Browser launched');

@@ -239,6 +239,11 @@ async function testThreeJSRenderer() {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--headless=new',
+            // WebGL support in headless mode
+            '--use-gl=swiftshader',
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+            '--disable-software-rasterizer',
         ],
     });
     

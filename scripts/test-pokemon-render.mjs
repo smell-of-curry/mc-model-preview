@@ -258,6 +258,11 @@ async function testPokemonRender() {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--headless=new',
+            // WebGL support in headless mode
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+            '--enable-gpu',
+            '--use-angle=default',
         ],
     });
     
