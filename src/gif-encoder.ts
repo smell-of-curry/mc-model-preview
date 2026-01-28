@@ -55,8 +55,8 @@ function decodePng(buffer: Buffer): { width: number; height: number; data: Uint8
 }
 
 /**
- * Simple color quantization - reduces 24-bit colors to 8-bit palette
- * Uses a basic median cut algorithm
+ * Simple color quantization - reduces colors to 256-color palette
+ * Returns palette as array of 24-bit RGB integers (omggif format)
  */
 function quantizeFrame(
   rgbaData: Uint8Array,
@@ -82,7 +82,7 @@ function quantizeFrame(
     .sort((a, b) => b[1] - a[1])
     .slice(0, 256);
 
-  // Build palette (RGB values, 3 bytes per color)
+  // Build palette as array of 24-bit RGB integers (omggif format)
   const palette: number[] = [];
   const colorToIndex = new Map<number, number>();
   
@@ -91,13 +91,14 @@ function quantizeFrame(
     const r = ((color15bit >> 10) & 0x1f) << 3;
     const g = ((color15bit >> 5) & 0x1f) << 3;
     const b = (color15bit & 0x1f) << 3;
-    palette.push(r, g, b);
+    // omggif expects palette entries as 24-bit integers: (r << 16) | (g << 8) | b
+    palette.push((r << 16) | (g << 8) | b);
     colorToIndex.set(color15bit, i);
   }
 
-  // Pad palette to 256 colors if needed
-  while (palette.length < 256 * 3) {
-    palette.push(0, 0, 0);
+  // Pad palette to 256 colors (power of 2 required by GIF)
+  while (palette.length < 256) {
+    palette.push(0x000000); // Black padding
   }
 
   // Map pixels to palette indices
@@ -122,16 +123,17 @@ function quantizeFrame(
 }
 
 /**
- * Find the closest color in the palette
+ * Find the closest color in the palette (palette entries are 24-bit RGB integers)
  */
 function findClosestColor(r: number, g: number, b: number, palette: number[]): number {
   let minDist = Infinity;
   let closestIndex = 0;
   
-  for (let i = 0; i < 256; i++) {
-    const pr = palette[i * 3];
-    const pg = palette[i * 3 + 1];
-    const pb = palette[i * 3 + 2];
+  for (let i = 0; i < palette.length; i++) {
+    const rgb = palette[i];
+    const pr = (rgb >> 16) & 0xff;
+    const pg = (rgb >> 8) & 0xff;
+    const pb = rgb & 0xff;
     const dist = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
     if (dist < minDist) {
       minDist = dist;
@@ -168,7 +170,7 @@ export async function createGifFromFrames(
     const maxSize = width * height * frames.length + 1024 * frames.length;
     const gifBuffer = Buffer.alloc(maxSize);
     
-    // Create GIF writer
+    // Create GIF writer without global palette (we'll use local palettes per frame)
     const gif = new omggif.GifWriter(gifBuffer, width, height, { loop: 0 });
     
     // Process each frame
@@ -191,7 +193,7 @@ export async function createGifFromFrames(
         // Quantize to 256 colors
         const { indexedPixels, palette } = quantizeFrame(pixelData, width, height);
         
-        // Add frame to GIF
+        // Add frame to GIF with local palette
         gif.addFrame(0, 0, width, height, indexedPixels, {
           palette: palette,
           delay: delay,
