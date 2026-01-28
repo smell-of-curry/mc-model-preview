@@ -24,17 +24,32 @@ Run TypeScript compiler in check mode to catch type errors:
 npx tsc --noEmit
 ```
 
-### 3. Run Tests (if available)
+### 3. Run Blockbench Web Test
 
-If tests exist, run them:
+Test the Blockbench web rendering locally (note: full rendering requires WebGL which only works in Docker/Linux):
 
 ```bash
-npm test
+node scripts/test-blockbench-web.mjs
 ```
 
-Note: Currently no tests are defined. Use `--passWithNoTests` if needed.
+This test validates:
+- Blockbench web loads correctly
+- Bundle patches are applied (Interface.tab_bar.new_tab fix)
+- Model loading works
 
-### 4. Verify Git Status
+Note: On macOS, WebGL won't work in headless Chrome. Use Docker for full testing.
+
+### 4. Run Tests in Docker (Recommended)
+
+For full testing matching the GitHub Actions environment:
+
+```bash
+./scripts/test-docker.sh
+```
+
+This runs in Ubuntu with Chrome and WebGL support.
+
+### 5. Verify Git Status
 
 Check that all necessary files are staged:
 

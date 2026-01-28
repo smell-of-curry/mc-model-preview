@@ -74374,6 +74374,31 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
         page = await browser.newPage();
         // Set viewport to ensure consistent canvas size
         await page.setViewport({ width: 1280, height: 720 });
+        // Intercept bundle.js to fix Interface.tab_bar.new_tab issue
+        // The web version doesn't have tab_bar initialized, causing errors
+        await page.setRequestInterception(true);
+        page.on('request', async (request) => {
+            const url = request.url();
+            if (url.includes('bundle.js') && url.includes('blockbench')) {
+                try {
+                    const response = await fetch(url);
+                    let scriptContent = await response.text();
+                    // Fix Interface.tab_bar.new_tab access where tab_bar is undefined
+                    scriptContent = scriptContent.replace(/Interface\.tab_bar\.new_tab/g, '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})');
+                    request.respond({
+                        status: 200,
+                        contentType: 'application/javascript',
+                        body: scriptContent
+                    });
+                    core.info('Patched Blockbench bundle.js');
+                    return;
+                }
+                catch (e) {
+                    core.warning(`Failed to patch bundle: ${e}`);
+                }
+            }
+            request.continue();
+        });
         core.info('Loading Blockbench web...');
         await page.goto(BLOCKBENCH_WEB_URL, {
             waitUntil: 'networkidle2',
@@ -74410,31 +74435,8 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
                             bones: bbmodel.elements || []
                         }]
                 };
-                // Override settings to prevent "Cannot read properties of undefined" errors
-                // The web version doesn't fully initialize settings like the desktop version
-                // We must ensure settings and required sub-properties exist before calling load
-                if (!win.settings) {
-                    win.settings = {};
-                }
-                // Mock common settings that Blockbench code may access
-                const settingsDefaults = {
-                    new_tab: { value: false },
-                    default_path: { value: '' },
-                    animation_snap: { value: 24 },
-                    preview_checkerboard: { value: true },
-                };
-                for (const [key, defaultValue] of Object.entries(settingsDefaults)) {
-                    if (!win.settings[key]) {
-                        win.settings[key] = defaultValue;
-                    }
-                }
-                // Use newProject() to properly initialize a bedrock project first
-                // This ensures all project state is set up correctly
-                if (win.newProject && win.Formats?.bedrock) {
-                    win.newProject(win.Formats.bedrock);
-                }
-                // Use Codecs.bedrock.load() which handles project creation automatically
-                // It expects the parsed object (not string) and a file-like object with name
+                // Note: The Interface.tab_bar.new_tab issue is fixed by patching bundle.js above
+                // Now try to load the model using Codecs.bedrock.load()
                 if (win.Codecs?.bedrock?.load) {
                     win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
                 }
