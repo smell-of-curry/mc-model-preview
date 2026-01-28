@@ -128,6 +128,12 @@ async function renderModelWithBlockbenchWeb(
           }]
         };
         
+        // Override settings.new_tab to prevent "Cannot read properties of undefined" error
+        // The web version tries to read settings.new_tab.value but it's undefined by default
+        if (win.settings) {
+          win.settings.new_tab = { value: false };
+        }
+        
         // Use Codecs.bedrock.load() which handles project creation automatically
         // It expects the parsed object (not string) and a file-like object with name
         if (win.Codecs?.bedrock?.load) {
