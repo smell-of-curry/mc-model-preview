@@ -20,10 +20,15 @@ chmod +x "$BB_APP_IMAGE"
 
 # Try to ensure AppImage can run; if FUSE is missing, fall back to extraction
 echo "Verifying AppImage runtime..."
-# Attempt to install libfuse2 and xvfb if possible (ignore failures)
+# Attempt to install libfuse2, xvfb, and mesa libraries for software rendering (ignore failures)
 if command -v sudo >/dev/null 2>&1; then
   sudo apt-get update -y >/dev/null 2>&1 || true
-  sudo apt-get install -y libfuse2 xvfb >/dev/null 2>&1 || true
+  # Install dependencies:
+  # - libfuse2: for AppImage support
+  # - xvfb: virtual framebuffer for headless display
+  # - libegl1-mesa, libgl1-mesa-dri, libgl1-mesa-glx: Mesa OpenGL for software rendering
+  # - libosmesa6: Off-screen Mesa rendering
+  sudo apt-get install -y libfuse2 xvfb libegl1-mesa libgl1-mesa-dri libgl1-mesa-glx libosmesa6 >/dev/null 2>&1 || true
 fi
 
 # Extract AppImage unconditionally to avoid setuid sandbox issues and prefer AppRun

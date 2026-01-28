@@ -33344,20 +33344,34 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 // Run under xvfb if available to satisfy Electron's display requirements
                 // Precompute if xvfb-run exists
                 const tryXvfb = await exec.getExecOutput('which', ['xvfb-run'], { ignoreReturnCode: true });
-                // Build common Blockbench args with extra Electron flags to reduce hangs
+                // Build common Blockbench args with extra Electron flags for headless CI rendering
+                // IMPORTANT: We need software rendering in CI since there's no GPU
+                // - Do NOT disable software rasterizer (we need it!)
+                // - Use SwiftShader/ANGLE for OpenGL software rendering
                 const bbArgs = [
                     '--headless',
                     '--no-sandbox',
                     '--disable-gpu',
-                    '--disable-software-rasterizer',
                     '--disable-dev-shm-usage',
                     '--disable-features=VizDisplayCompositor',
+                    '--use-gl=angle',
+                    '--use-angle=swiftshader',
+                    '--enable-webgl-software-rendering',
+                    '--in-process-gpu',
                     `--project=${modelPath}`,
                     `--export=${outputPath}`,
                     '--render',
                 ];
                 // If using extracted AppRun, set APPDIR and cwd to extracted root
-                const env = { ...process.env, APPDIR: extractedDir, APPIMAGE: appImagePath };
+                // Also set LIBGL_ALWAYS_SOFTWARE to force software rendering
+                const env = {
+                    ...process.env,
+                    APPDIR: extractedDir,
+                    APPIMAGE: appImagePath,
+                    LIBGL_ALWAYS_SOFTWARE: '1',
+                    MESA_GL_VERSION_OVERRIDE: '3.3',
+                    DISPLAY: process.env.DISPLAY || ':99',
+                };
                 const options = { cwd: extractedDir, env };
                 // Try in this order:
                 // 1) xvfb-run + AppRun (preferred)
@@ -33398,17 +33412,25 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 if (bbExecutable === extractedAppRunPath) {
                     if (tryXvfb.exitCode === 0) {
                         try {
+                            core.info(`Attempting xvfb-run + AppRun render...`);
                             await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', extractedAppRunPath, ...bbArgs], options);
                             ran = true;
+                            core.info(`xvfb-run + AppRun completed`);
                         }
-                        catch { }
+                        catch (e) {
+                            core.warning(`xvfb-run + AppRun failed: ${e}`);
+                        }
                     }
                     if (!ran) {
                         try {
+                            core.info(`Attempting direct AppRun render...`);
                             await execWithTimeout(extractedAppRunPath, bbArgs, options);
                             ran = true;
+                            core.info(`Direct AppRun completed`);
                         }
-                        catch { }
+                        catch (e) {
+                            core.warning(`Direct AppRun failed: ${e}`);
+                        }
                     }
                 }
                 if (!ran) {
@@ -33416,14 +33438,20 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                     const appImageArgs = ['--appimage-extract-and-run', ...bbArgs];
                     if (tryXvfb.exitCode === 0) {
                         try {
+                            core.info(`Attempting xvfb-run + AppImage extract-and-run...`);
                             await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs]);
                             ran = true;
+                            core.info(`xvfb-run + AppImage completed`);
                         }
-                        catch { }
+                        catch (e) {
+                            core.warning(`xvfb-run + AppImage failed: ${e}`);
+                        }
                     }
                     if (!ran) {
+                        core.info(`Attempting direct AppImage extract-and-run...`);
                         await execWithTimeout(appImagePath, appImageArgs);
                         ran = true;
+                        core.info(`Direct AppImage completed`);
                     }
                 }
                 // Verify output exists; if not, attempt recovery from extracted dir
