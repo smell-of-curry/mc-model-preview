@@ -32976,6 +32976,7 @@ async function run() {
         // Render changes - pass base ref and head SHA for checkouts
         await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef, headSha);
         core.info('Action completed successfully.');
+        process.exit(0);
     }
     catch (error) {
         if (error instanceof Error) {
@@ -33347,30 +33348,40 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 // Build common Blockbench args with extra Electron flags for headless CI rendering
                 // IMPORTANT: We need software rendering in CI since there's no GPU
                 // - Do NOT disable software rasterizer (we need it!)
-                // - Use SwiftShader/ANGLE for OpenGL software rendering
+                // - Disable auto-updates to prevent timeout from downloading new versions
+                // - Use SwiftShader for software rendering
                 const bbArgs = [
                     '--headless',
                     '--no-sandbox',
                     '--disable-gpu',
                     '--disable-dev-shm-usage',
                     '--disable-features=VizDisplayCompositor',
-                    '--use-gl=angle',
-                    '--use-angle=swiftshader',
+                    '--disable-background-networking', // Prevent auto-update downloads
+                    '--disable-breakpad', // Disable crash reporter
+                    '--disable-component-update', // Disable component updates
+                    '--use-gl=swiftshader', // Use SwiftShader directly (simpler than ANGLE)
                     '--enable-webgl-software-rendering',
-                    '--in-process-gpu',
                     `--project=${modelPath}`,
                     `--export=${outputPath}`,
                     '--render',
                 ];
                 // If using extracted AppRun, set APPDIR and cwd to extracted root
-                // Also set LIBGL_ALWAYS_SOFTWARE to force software rendering
+                // Also set library paths and software rendering environment variables
                 const env = {
                     ...process.env,
                     APPDIR: extractedDir,
                     APPIMAGE: appImagePath,
+                    // Add extracted dir to library path so libffmpeg.so can be found
+                    LD_LIBRARY_PATH: `${extractedDir}:${extractedDir}/usr/lib:${process.env.LD_LIBRARY_PATH || ''}`,
+                    // Force software rendering
                     LIBGL_ALWAYS_SOFTWARE: '1',
                     MESA_GL_VERSION_OVERRIDE: '3.3',
+                    // SwiftShader settings
+                    VK_ICD_FILENAMES: path.join(extractedDir, 'vk_swiftshader_icd.json'),
+                    // Display for xvfb
                     DISPLAY: process.env.DISPLAY || ':99',
+                    // Disable Electron auto-updates
+                    ELECTRON_NO_UPDATER: '1',
                 };
                 const options = { cwd: extractedDir, env };
                 // Try in this order:
@@ -33436,10 +33447,12 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 if (!ran) {
                     // Fallback to AppImage extract-and-run
                     const appImageArgs = ['--appimage-extract-and-run', ...bbArgs];
+                    // Use same environment for AppImage runs
+                    const appImageOptions = { env };
                     if (tryXvfb.exitCode === 0) {
                         try {
                             core.info(`Attempting xvfb-run + AppImage extract-and-run...`);
-                            await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs]);
+                            await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs], appImageOptions);
                             ran = true;
                             core.info(`xvfb-run + AppImage completed`);
                         }
@@ -33449,7 +33462,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                     }
                     if (!ran) {
                         core.info(`Attempting direct AppImage extract-and-run...`);
-                        await execWithTimeout(appImagePath, appImageArgs);
+                        await execWithTimeout(appImagePath, appImageArgs, appImageOptions);
                         ran = true;
                         core.info(`Direct AppImage completed`);
                     }
