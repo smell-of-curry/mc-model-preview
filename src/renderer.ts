@@ -351,76 +351,45 @@ async function renderChangedAnimations(
     }
   }
   
-  // For now, render idle animations for entities with animation changes
-  // In a full implementation, we'd use findChangedAnimations to determine which specific animations changed
-  const processedEntities = new Set<string>();
-  
+  // Render ALL animations for entities with changed animation files
   for (const entity of entities) {
-    if (processedEntities.has(entity.identifier)) continue;
     if (entity.animationFiles.length === 0) continue;
     
-    // Find an idle animation for this entity
-    const idleAnimId = findIdleAnimation(entity.identifier, animationMap);
-    if (!idleAnimId) continue;
+    // Get all animations for this entity
+    const entityAnimations: Array<{ animId: string; animData: import('./types').BedrockAnimation }> = [];
     
-    const animInfo = animationMap.get(idleAnimId);
-    if (!animInfo) continue;
-    
-    core.info(`Rendering animation ${idleAnimId} for ${entity.identifier}`);
-    
-    try {
-      const result = await renderAnimationGif(
-        entity,
-        idleAnimId,
-        animInfo.animationData,
-        resourcePackPath,
-        tempDir,
-        browser
-      );
-      
-      if (result) {
-        renderedAnimations.push(result);
-        processedEntities.add(entity.identifier);
+    for (const [animId, info] of animationMap) {
+      if (info.entity.identifier === entity.identifier) {
+        entityAnimations.push({ animId, animData: info.animationData });
       }
-    } catch (error) {
-      core.warning(`Failed to render animation ${idleAnimId}: ${error}`);
+    }
+    
+    core.info(`Found ${entityAnimations.length} animations for ${entity.identifier}`);
+    
+    // Render each animation
+    for (const { animId, animData } of entityAnimations) {
+      core.info(`Rendering animation ${animId} for ${entity.identifier}`);
+      
+      try {
+        const result = await renderAnimationGif(
+          entity,
+          animId,
+          animData,
+          resourcePackPath,
+          tempDir,
+          browser
+        );
+        
+        if (result) {
+          renderedAnimations.push(result);
+        }
+      } catch (error) {
+        core.warning(`Failed to render animation ${animId}: ${error}`);
+      }
     }
   }
   
   return renderedAnimations;
-}
-
-/**
- * Find an idle animation for an entity
- */
-function findIdleAnimation(
-  entityIdentifier: string,
-  animationMap: Map<string, { entity: Entity; animationFile: string; animationData: import('./types').BedrockAnimation }>
-): string | null {
-  // Extract the entity name from the identifier (e.g., "pokemon:ferroseed" -> "ferroseed")
-  const entityName = entityIdentifier.split(':').pop() || entityIdentifier;
-  
-  // Priority order for idle animations
-  const idlePatterns = [
-    `animation.${entityName}.ground_idle`,
-    `animation.${entityName}.idle`,
-    `animation.${entityName}.water_idle`,
-  ];
-  
-  for (const pattern of idlePatterns) {
-    if (animationMap.has(pattern)) {
-      return pattern;
-    }
-  }
-  
-  // Fall back to any animation containing "idle" for this entity
-  for (const [animId, info] of animationMap) {
-    if (info.entity.identifier === entityIdentifier && animId.includes('idle')) {
-      return animId;
-    }
-  }
-  
-  return null;
 }
 
 /**
