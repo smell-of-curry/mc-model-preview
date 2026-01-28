@@ -8,8 +8,9 @@ BB_EXTRACTED_DIR="Blockbench_extracted"
 
 # Download BlockBench AppImage
 if [ ! -f "$BB_APP_IMAGE" ]; then
-  echo "Downloading BlockBench v${BB_VERSION}..."
-  wget -q --show-progress "https://github.com/JannisX11/blockbench/releases/download/v${BB_VERSION}/${BB_APP_IMAGE}"
+  echo "Downloading BlockBench v${BB_VERSION}... (this may take a moment)"
+  wget -q "https://github.com/JannisX11/blockbench/releases/download/v${BB_VERSION}/${BB_APP_IMAGE}"
+  echo "Download complete."
 else
   echo "BlockBench AppImage already exists."
 fi

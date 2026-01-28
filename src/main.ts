@@ -66,13 +66,12 @@ async function run(): Promise<void> {
       affectedEntityIds.includes(e.identifier)
     );
 
-    // Render changes - pass branch refs so renderer can checkout as needed
+    // Render changes - pass base ref for checkout (HEAD SHA is captured internally)
     await renderChanges(
       affectedBaseEntities,
       affectedHeadEntities,
       resourcePackPath,
-      baseRef,
-      headRef
+      baseRef
     );
 
     core.info('Action completed successfully.');

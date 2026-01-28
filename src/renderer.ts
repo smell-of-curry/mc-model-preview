@@ -8,7 +8,7 @@ import { Entity } from './types';
 import { createBBFile } from './blockbench';
 import { uploadImages } from './image-hosting';
 import { postComment } from './comment';
-import { checkout } from './git';
+import { checkout, getHeadSha } from './git';
 
 const BB_VERSION = '4.11.0';
 const BB_APP_IMAGE = `Blockbench_${BB_VERSION}.AppImage`;
@@ -24,8 +24,7 @@ export async function renderChanges(
   baseEntities: Entity[],
   prEntities: Entity[],
   resourcePackPath: string,
-  baseRef: string,
-  headRef: string
+  baseRef: string
 ): Promise<void> {
   const toSafeFilename = (name: string): string => {
     return name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -52,6 +51,10 @@ export async function renderChanges(
     core.info(`Using AppImage at ${appImagePath}`);
   }
 
+  // Store the current HEAD SHA before any checkouts (needed for PR merge refs)
+  const headSha = await getHeadSha();
+  core.info(`Stored HEAD SHA: ${headSha}`);
+
   // Generate "before" models (checkout base branch first)
   core.info(`Checking out base branch (${baseRef}) to generate base models...`);
   await checkout(baseRef);
@@ -68,9 +71,9 @@ export async function renderChanges(
     }
   }
 
-  // Generate "after" models (checkout head branch)
-  core.info(`Checking out head branch (${headRef}) to generate head models...`);
-  await checkout(headRef);
+  // Generate "after" models (checkout back to original HEAD SHA)
+  core.info(`Checking out HEAD (${headSha}) to generate head models...`);
+  await checkout(headSha);
   for (const entity of prEntities) {
     try {
       const bbmodel = await createBBFile(entity, resourcePackPath);

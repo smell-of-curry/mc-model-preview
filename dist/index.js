@@ -32736,8 +32736,15 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.getHeadSha = getHeadSha;
 exports.checkout = checkout;
 const exec = __importStar(__nccwpck_require__(5236));
+async function getHeadSha() {
+    const result = await exec.getExecOutput('git', ['rev-parse', 'HEAD'], {
+        silent: true,
+    });
+    return result.stdout.trim();
+}
 async function checkout(ref) {
     // Try a straightforward checkout first
     const result = await exec.getExecOutput('git', ['checkout', ref], {
@@ -32963,8 +32970,8 @@ async function run() {
         // Filter base entities to only include those affected in the PR
         const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
         const affectedBaseEntities = baseEntities.filter((e) => affectedEntityIds.includes(e.identifier));
-        // Render changes - pass branch refs so renderer can checkout as needed
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef, headRef);
+        // Render changes - pass base ref for checkout (HEAD SHA is captured internally)
+        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef);
         core.info('Action completed successfully.');
     }
     catch (error) {
@@ -33264,7 +33271,7 @@ async function setupBlockbench() {
     const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
     await exec.exec('bash', [scriptPath]);
 }
-async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headRef) {
+async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef) {
     const toSafeFilename = (name) => {
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
@@ -33291,6 +33298,9 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         bbExecutable = appImagePath;
         core.info(`Using AppImage at ${appImagePath}`);
     }
+    // Store the current HEAD SHA before any checkouts (needed for PR merge refs)
+    const headSha = await (0, git_1.getHeadSha)();
+    core.info(`Stored HEAD SHA: ${headSha}`);
     // Generate "before" models (checkout base branch first)
     core.info(`Checking out base branch (${baseRef}) to generate base models...`);
     await (0, git_1.checkout)(baseRef);
@@ -33305,9 +33315,9 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
         }
     }
-    // Generate "after" models (checkout head branch)
-    core.info(`Checking out head branch (${headRef}) to generate head models...`);
-    await (0, git_1.checkout)(headRef);
+    // Generate "after" models (checkout back to original HEAD SHA)
+    core.info(`Checking out HEAD (${headSha}) to generate head models...`);
+    await (0, git_1.checkout)(headSha);
     for (const entity of prEntities) {
         try {
             const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);

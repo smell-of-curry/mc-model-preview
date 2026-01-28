@@ -1,5 +1,12 @@
 import * as exec from '@actions/exec';
 
+export async function getHeadSha(): Promise<string> {
+  const result = await exec.getExecOutput('git', ['rev-parse', 'HEAD'], {
+    silent: true,
+  });
+  return result.stdout.trim();
+}
+
 export async function checkout(ref: string): Promise<void> {
   // Try a straightforward checkout first
   const result = await exec.getExecOutput('git', ['checkout', ref], {
