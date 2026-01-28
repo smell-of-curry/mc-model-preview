@@ -15,3 +15,5 @@ lerna-debug.log*
 .env
 /coverage
 debug-screenshot.png
+test-render.png
+ferroseed-render.png

@@ -4,22 +4,16 @@ import * as path from 'path';
 import * as io from '@actions/io';
 import * as fs from 'fs/promises';
 import * as github from '@actions/github';
-import type { Browser, Page } from 'puppeteer-core';
 import { Entity } from './types';
 import { createBBFile } from './blockbench';
 import { uploadImages } from './image-hosting';
 import { postComment } from './comment';
 import { checkout } from './git';
+import { renderBBModelWithThreeJS } from './threejs-renderer';
 
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
   return await import('puppeteer-core');
-}
-
-const BLOCKBENCH_WEB_URL = 'https://web.blockbench.net/';
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
@@ -63,268 +57,6 @@ async function findChromePath(): Promise<string> {
   } catch {}
   
   throw new Error('Chrome/Chromium not found. Please ensure Google Chrome or Chromium is installed.');
-}
-
-/**
- * Render a bbmodel file using Blockbench's web version
- */
-async function renderModelWithBlockbenchWeb(
-  bbmodelPath: string,
-  outputPath: string,
-  browser: Browser
-): Promise<boolean> {
-  let page: Page | null = null;
-  
-  try {
-    // Create a new page for this render
-    page = await browser.newPage();
-    
-    // Set viewport to ensure consistent canvas size
-    await page.setViewport({ width: 1280, height: 720 });
-    
-    // Intercept bundle.js to fix Interface.tab_bar.new_tab issue
-    // The web version doesn't have tab_bar initialized, causing errors
-    await page.setRequestInterception(true);
-    page.on('request', async (request) => {
-      const url = request.url();
-      if (url.includes('bundle.js') && url.includes('blockbench')) {
-        try {
-          const response = await fetch(url);
-          let scriptContent = await response.text();
-          
-          // === CRITICAL PATCH: Interface.tab_bar.new_tab ===
-          // Blockbench web doesn't have tab_bar initialized in headless mode
-          scriptContent = scriptContent.replace(
-            /Interface\.tab_bar\.new_tab/g,
-            '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})'
-          );
-          
-          // === PATCH: northMarkMaterial.color in buildGrid ===
-          // When 3D preview fails to init, this material might not exist
-          scriptContent = scriptContent.replace(
-            /ct\.northMarkMaterial\.color=/g,
-            '(ct.northMarkMaterial?ct.northMarkMaterial.color='
-          );
-          // Close the ternary - this is safe because the original line ends with ;
-          // Original: ct.northMarkMaterial.color=uc.grid;
-          // Patched: (ct.northMarkMaterial?ct.northMarkMaterial.color=uc.grid:0);
-          scriptContent = scriptContent.replace(
-            /\(ct\.northMarkMaterial\?ct\.northMarkMaterial\.color=([^;]+);/g,
-            '(ct.northMarkMaterial?ct.northMarkMaterial.color=$1:0);'
-          );
-          
-          // === PATCH: three_grid.children.empty() ===
-          // Guard against missing three_grid
-          scriptContent = scriptContent.replace(
-            /three_grid\.children\.empty\(\)/g,
-            '(three_grid&&three_grid.children?three_grid.children.empty():null)'
-          );
-          
-          // === PATCH: side_grids access ===
-          // Guard against missing side_grids
-          scriptContent = scriptContent.replace(
-            /ct\.side_grids&&\(ct\.side_grids\.x\.children\.empty\(\),ct\.side_grids\.z\.children\.empty\(\)\)/g,
-            'ct.side_grids&&ct.side_grids.x&&ct.side_grids.z&&(ct.side_grids.x.children.empty(),ct.side_grids.z.children.empty())'
-          );
-          
-          request.respond({
-            status: 200,
-            contentType: 'application/javascript',
-            body: scriptContent
-          });
-          core.info('Patched Blockbench bundle.js');
-          return;
-        } catch (e) {
-          core.warning(`Failed to patch bundle: ${e}`);
-        }
-      }
-      request.continue();
-    });
-    
-    core.info('Loading Blockbench web...');
-    await page.goto(BLOCKBENCH_WEB_URL, { 
-      waitUntil: 'networkidle2', 
-      timeout: 60000 
-    });
-    
-    // Wait for Blockbench to fully load
-    core.info('Waiting for Blockbench to initialize...');
-    await page.waitForFunction(
-      () => {
-        const win = window as any;
-        return typeof win.Blockbench !== 'undefined' && 
-               typeof win.Codecs !== 'undefined' &&
-               typeof win.Formats !== 'undefined' &&
-               typeof win.newProject !== 'undefined';
-      },
-      { timeout: 30000 }
-    );
-    
-    core.info('Blockbench web loaded successfully');
-    
-    // Initialize any missing globals that Blockbench expects
-    await page.evaluate(() => {
-      const win = window as any;
-      
-      // Ensure markerColors exists (needed for element color property)
-      if (!win.markerColors) {
-        win.markerColors = [
-          { id: 'gray', standard: '#808080', pastel: '#c0c0c0' },
-          { id: 'red', standard: '#ff0000', pastel: '#ffcccc' },
-          { id: 'orange', standard: '#ff8800', pastel: '#ffe0cc' },
-          { id: 'yellow', standard: '#ffff00', pastel: '#ffffcc' },
-          { id: 'green', standard: '#00ff00', pastel: '#ccffcc' },
-          { id: 'blue', standard: '#0088ff', pastel: '#cce5ff' },
-          { id: 'purple', standard: '#8800ff', pastel: '#e5ccff' },
-          { id: 'pink', standard: '#ff00ff', pastel: '#ffccff' },
-        ];
-      }
-      
-      // Ensure settings.inherit_parent_color exists
-      if (win.settings && !win.settings.inherit_parent_color) {
-        win.settings.inherit_parent_color = { value: false };
-      }
-    });
-    
-    // Read the bbmodel file content
-    const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
-    
-    // Wait for the preview canvas to exist before loading any model
-    core.info('Waiting for preview canvas...');
-    try {
-      await page.waitForSelector('#preview canvas', { timeout: 10000 });
-      core.info('Preview canvas found');
-    } catch {
-      core.warning('Preview canvas not found after 10s - 3D preview may not be initialized');
-    }
-    
-    // Load the model and render
-    core.info('Loading model via Blockbench API...');
-    
-    const result = await page.evaluate(async (modelJson: string) => {
-      try {
-        const win = window as any;
-        
-        // First, check if preview canvas exists
-        const previewCanvas = document.querySelector('#preview canvas');
-        if (!previewCanvas) {
-          // Try to manually initialize preview if possible
-          if (win.Preview && win.Preview.all && win.Preview.all.length === 0) {
-            // No previews exist, try to create one
-            try {
-              new win.Preview({ id: 'main' });
-            } catch (e) {
-              console.warn('Could not create Preview:', e);
-            }
-          }
-        }
-        
-        // Parse our bbmodel JSON
-        const bbmodel = JSON.parse(modelJson);
-        
-        // Build proper Bedrock geometry format from our bbmodel
-        const bedrockGeo = {
-          format_version: '1.12.0',
-          'minecraft:geometry': [{
-            description: {
-              identifier: `geometry.${bbmodel.name || 'model'}`,
-              texture_width: bbmodel.resolution?.width || 16,
-              texture_height: bbmodel.resolution?.height || 16,
-            },
-            bones: bbmodel.elements || []
-          }]
-        };
-        
-        // Try to load using bedrock codec with error catching
-        let loadError: string | null = null;
-        if (win.Codecs?.bedrock?.load) {
-          try {
-            win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
-          } catch (e: any) {
-            loadError = e?.message || String(e);
-            console.warn('Codec load error:', loadError);
-          }
-        } else {
-          return { success: false, error: 'Codecs.bedrock.load not available' };
-        }
-        
-        // Wait for model to load and render
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Try to center/fit the model in view
-        try {
-          if (win.Canvas?.center) {
-            win.Canvas.center();
-          }
-        } catch (e) {
-          console.warn('Canvas.center error:', e);
-        }
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Get the preview canvas
-        const canvas = document.querySelector('#preview canvas') as HTMLCanvasElement;
-        if (!canvas) {
-          return { 
-            success: false, 
-            error: 'Preview canvas not found after model load',
-            loadError,
-            previewCount: win.Preview?.all?.length || 0
-          };
-        }
-        
-        // Get the image data
-        let dataUrl: string;
-        try {
-          dataUrl = canvas.toDataURL('image/png');
-        } catch (e: any) {
-          return { success: false, error: `Failed to get canvas data: ${e?.message}` };
-        }
-        
-        // Verify we got actual image data
-        if (dataUrl.length < 1000) {
-          return { 
-            success: false, 
-            error: `Canvas data too small (${dataUrl.length} chars) - model may not have rendered`,
-            loadError
-          };
-        }
-        
-        // Report element count for debugging
-        const elementCount = win.Outliner?.elements?.length || 0;
-        
-        return { success: true, dataUrl, elementCount, loadError };
-      } catch (e: any) {
-        return { success: false, error: e.message || String(e) };
-      }
-    }, bbmodelContent);
-    
-    if (result.elementCount !== undefined) {
-      core.info(`Loaded ${result.elementCount} elements`);
-    }
-    
-    if (!result.success) {
-      core.warning(`Blockbench render failed: ${result.error}`);
-      return false;
-    }
-    
-    if (result.dataUrl) {
-      // Convert data URL to buffer and save
-      const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
-      await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
-      core.info(`Saved render to ${outputPath}`);
-      return true;
-    }
-    
-    return false;
-  } catch (e) {
-    core.warning(`Render error: ${e}`);
-    return false;
-  } finally {
-    // Close the page to clean up
-    if (page) {
-      await page.close().catch(() => {});
-    }
-  }
 }
 
 export async function renderChanges(
@@ -396,8 +128,8 @@ export async function renderChanges(
       }
     }
     
-    // Render the models using Blockbench web
-    core.info('Rendering models with Blockbench web...');
+    // Render the models using Three.js
+    core.info('Rendering models with Three.js...');
     const filesToRender = await fs.readdir(tempDir);
     
     for (const file of filesToRender) {
@@ -411,7 +143,7 @@ export async function renderChanges(
         
         core.info(`Rendering: ${modelPath} -> ${outputPath}`);
         
-        const success = await renderModelWithBlockbenchWeb(modelPath, outputPath, browser);
+        const success = await renderBBModelWithThreeJS(modelPath, outputPath, browser);
         
         if (success) {
           core.info(`Successfully rendered ${file}`);

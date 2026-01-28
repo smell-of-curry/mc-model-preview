@@ -74315,13 +74315,10 @@ const blockbench_1 = __nccwpck_require__(39402);
 const image_hosting_1 = __nccwpck_require__(4705);
 const comment_1 = __nccwpck_require__(62246);
 const git_1 = __nccwpck_require__(71243);
+const threejs_renderer_1 = __nccwpck_require__(65802);
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
     return await Promise.resolve().then(() => __importStar(__nccwpck_require__(15101)));
-}
-const BLOCKBENCH_WEB_URL = 'https://web.blockbench.net/';
-async function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
 /**
  * Find Chrome/Chromium executable on the system
@@ -74363,222 +74360,6 @@ async function findChromePath() {
     }
     catch { }
     throw new Error('Chrome/Chromium not found. Please ensure Google Chrome or Chromium is installed.');
-}
-/**
- * Render a bbmodel file using Blockbench's web version
- */
-async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
-    let page = null;
-    try {
-        // Create a new page for this render
-        page = await browser.newPage();
-        // Set viewport to ensure consistent canvas size
-        await page.setViewport({ width: 1280, height: 720 });
-        // Intercept bundle.js to fix Interface.tab_bar.new_tab issue
-        // The web version doesn't have tab_bar initialized, causing errors
-        await page.setRequestInterception(true);
-        page.on('request', async (request) => {
-            const url = request.url();
-            if (url.includes('bundle.js') && url.includes('blockbench')) {
-                try {
-                    const response = await fetch(url);
-                    let scriptContent = await response.text();
-                    // === CRITICAL PATCH: Interface.tab_bar.new_tab ===
-                    // Blockbench web doesn't have tab_bar initialized in headless mode
-                    scriptContent = scriptContent.replace(/Interface\.tab_bar\.new_tab/g, '(Interface.tab_bar?.new_tab ?? {visible:false,selected:false,select:()=>{}})');
-                    // === PATCH: northMarkMaterial.color in buildGrid ===
-                    // When 3D preview fails to init, this material might not exist
-                    scriptContent = scriptContent.replace(/ct\.northMarkMaterial\.color=/g, '(ct.northMarkMaterial?ct.northMarkMaterial.color=');
-                    // Close the ternary - this is safe because the original line ends with ;
-                    // Original: ct.northMarkMaterial.color=uc.grid;
-                    // Patched: (ct.northMarkMaterial?ct.northMarkMaterial.color=uc.grid:0);
-                    scriptContent = scriptContent.replace(/\(ct\.northMarkMaterial\?ct\.northMarkMaterial\.color=([^;]+);/g, '(ct.northMarkMaterial?ct.northMarkMaterial.color=$1:0);');
-                    // === PATCH: three_grid.children.empty() ===
-                    // Guard against missing three_grid
-                    scriptContent = scriptContent.replace(/three_grid\.children\.empty\(\)/g, '(three_grid&&three_grid.children?three_grid.children.empty():null)');
-                    // === PATCH: side_grids access ===
-                    // Guard against missing side_grids
-                    scriptContent = scriptContent.replace(/ct\.side_grids&&\(ct\.side_grids\.x\.children\.empty\(\),ct\.side_grids\.z\.children\.empty\(\)\)/g, 'ct.side_grids&&ct.side_grids.x&&ct.side_grids.z&&(ct.side_grids.x.children.empty(),ct.side_grids.z.children.empty())');
-                    request.respond({
-                        status: 200,
-                        contentType: 'application/javascript',
-                        body: scriptContent
-                    });
-                    core.info('Patched Blockbench bundle.js');
-                    return;
-                }
-                catch (e) {
-                    core.warning(`Failed to patch bundle: ${e}`);
-                }
-            }
-            request.continue();
-        });
-        core.info('Loading Blockbench web...');
-        await page.goto(BLOCKBENCH_WEB_URL, {
-            waitUntil: 'networkidle2',
-            timeout: 60000
-        });
-        // Wait for Blockbench to fully load
-        core.info('Waiting for Blockbench to initialize...');
-        await page.waitForFunction(() => {
-            const win = window;
-            return typeof win.Blockbench !== 'undefined' &&
-                typeof win.Codecs !== 'undefined' &&
-                typeof win.Formats !== 'undefined' &&
-                typeof win.newProject !== 'undefined';
-        }, { timeout: 30000 });
-        core.info('Blockbench web loaded successfully');
-        // Initialize any missing globals that Blockbench expects
-        await page.evaluate(() => {
-            const win = window;
-            // Ensure markerColors exists (needed for element color property)
-            if (!win.markerColors) {
-                win.markerColors = [
-                    { id: 'gray', standard: '#808080', pastel: '#c0c0c0' },
-                    { id: 'red', standard: '#ff0000', pastel: '#ffcccc' },
-                    { id: 'orange', standard: '#ff8800', pastel: '#ffe0cc' },
-                    { id: 'yellow', standard: '#ffff00', pastel: '#ffffcc' },
-                    { id: 'green', standard: '#00ff00', pastel: '#ccffcc' },
-                    { id: 'blue', standard: '#0088ff', pastel: '#cce5ff' },
-                    { id: 'purple', standard: '#8800ff', pastel: '#e5ccff' },
-                    { id: 'pink', standard: '#ff00ff', pastel: '#ffccff' },
-                ];
-            }
-            // Ensure settings.inherit_parent_color exists
-            if (win.settings && !win.settings.inherit_parent_color) {
-                win.settings.inherit_parent_color = { value: false };
-            }
-        });
-        // Read the bbmodel file content
-        const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
-        // Wait for the preview canvas to exist before loading any model
-        core.info('Waiting for preview canvas...');
-        try {
-            await page.waitForSelector('#preview canvas', { timeout: 10000 });
-            core.info('Preview canvas found');
-        }
-        catch {
-            core.warning('Preview canvas not found after 10s - 3D preview may not be initialized');
-        }
-        // Load the model and render
-        core.info('Loading model via Blockbench API...');
-        const result = await page.evaluate(async (modelJson) => {
-            try {
-                const win = window;
-                // First, check if preview canvas exists
-                const previewCanvas = document.querySelector('#preview canvas');
-                if (!previewCanvas) {
-                    // Try to manually initialize preview if possible
-                    if (win.Preview && win.Preview.all && win.Preview.all.length === 0) {
-                        // No previews exist, try to create one
-                        try {
-                            new win.Preview({ id: 'main' });
-                        }
-                        catch (e) {
-                            console.warn('Could not create Preview:', e);
-                        }
-                    }
-                }
-                // Parse our bbmodel JSON
-                const bbmodel = JSON.parse(modelJson);
-                // Build proper Bedrock geometry format from our bbmodel
-                const bedrockGeo = {
-                    format_version: '1.12.0',
-                    'minecraft:geometry': [{
-                            description: {
-                                identifier: `geometry.${bbmodel.name || 'model'}`,
-                                texture_width: bbmodel.resolution?.width || 16,
-                                texture_height: bbmodel.resolution?.height || 16,
-                            },
-                            bones: bbmodel.elements || []
-                        }]
-                };
-                // Try to load using bedrock codec with error catching
-                let loadError = null;
-                if (win.Codecs?.bedrock?.load) {
-                    try {
-                        win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
-                    }
-                    catch (e) {
-                        loadError = e?.message || String(e);
-                        console.warn('Codec load error:', loadError);
-                    }
-                }
-                else {
-                    return { success: false, error: 'Codecs.bedrock.load not available' };
-                }
-                // Wait for model to load and render
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                // Try to center/fit the model in view
-                try {
-                    if (win.Canvas?.center) {
-                        win.Canvas.center();
-                    }
-                }
-                catch (e) {
-                    console.warn('Canvas.center error:', e);
-                }
-                await new Promise(resolve => setTimeout(resolve, 500));
-                // Get the preview canvas
-                const canvas = document.querySelector('#preview canvas');
-                if (!canvas) {
-                    return {
-                        success: false,
-                        error: 'Preview canvas not found after model load',
-                        loadError,
-                        previewCount: win.Preview?.all?.length || 0
-                    };
-                }
-                // Get the image data
-                let dataUrl;
-                try {
-                    dataUrl = canvas.toDataURL('image/png');
-                }
-                catch (e) {
-                    return { success: false, error: `Failed to get canvas data: ${e?.message}` };
-                }
-                // Verify we got actual image data
-                if (dataUrl.length < 1000) {
-                    return {
-                        success: false,
-                        error: `Canvas data too small (${dataUrl.length} chars) - model may not have rendered`,
-                        loadError
-                    };
-                }
-                // Report element count for debugging
-                const elementCount = win.Outliner?.elements?.length || 0;
-                return { success: true, dataUrl, elementCount, loadError };
-            }
-            catch (e) {
-                return { success: false, error: e.message || String(e) };
-            }
-        }, bbmodelContent);
-        if (result.elementCount !== undefined) {
-            core.info(`Loaded ${result.elementCount} elements`);
-        }
-        if (!result.success) {
-            core.warning(`Blockbench render failed: ${result.error}`);
-            return false;
-        }
-        if (result.dataUrl) {
-            // Convert data URL to buffer and save
-            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
-            await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
-            core.info(`Saved render to ${outputPath}`);
-            return true;
-        }
-        return false;
-    }
-    catch (e) {
-        core.warning(`Render error: ${e}`);
-        return false;
-    }
-    finally {
-        // Close the page to clean up
-        if (page) {
-            await page.close().catch(() => { });
-        }
-    }
 }
 async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha) {
     const toSafeFilename = (name) => {
@@ -74633,8 +74414,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
             }
         }
-        // Render the models using Blockbench web
-        core.info('Rendering models with Blockbench web...');
+        // Render the models using Three.js
+        core.info('Rendering models with Three.js...');
         const filesToRender = await fs.readdir(tempDir);
         for (const file of filesToRender) {
             if (file.endsWith('.bbmodel')) {
@@ -74645,7 +74426,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
                 const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
                 const outputPath = path.join(tempDir, safeBaseName);
                 core.info(`Rendering: ${modelPath} -> ${outputPath}`);
-                const success = await renderModelWithBlockbenchWeb(modelPath, outputPath, browser);
+                const success = await (0, threejs_renderer_1.renderBBModelWithThreeJS)(modelPath, outputPath, browser);
                 if (success) {
                     core.info(`Successfully rendered ${file}`);
                 }
@@ -74682,6 +74463,423 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
     finally {
         // Close the browser
         await browser.close();
+    }
+}
+
+
+/***/ }),
+
+/***/ 65802:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Three.js based model renderer for Minecraft Bedrock geometry
+ * This replaces the Blockbench Web approach which has UI dependency issues in headless mode.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.renderModelWithThreeJS = renderModelWithThreeJS;
+exports.renderBBModelWithThreeJS = renderBBModelWithThreeJS;
+exports.renderGeometryWithThreeJS = renderGeometryWithThreeJS;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(91943));
+// The Three.js rendering code that runs in the browser
+const THREEJS_RENDER_SCRIPT = `
+// Helper to create a cube mesh from Bedrock cube data
+function createCube(cube, textureWidth, textureHeight, boneColor) {
+  const origin = cube.origin || [0, 0, 0];
+  const size = cube.size || [1, 1, 1];
+  const inflate = cube.inflate || 0;
+  
+  // Create geometry with inflated size
+  const geometry = new THREE.BoxGeometry(
+    size[0] + inflate * 2,
+    size[1] + inflate * 2,
+    size[2] + inflate * 2
+  );
+  
+  // Create material with a color based on bone
+  const material = new THREE.MeshStandardMaterial({
+    color: boneColor,
+    roughness: 0.8,
+    metalness: 0.1,
+  });
+  
+  const mesh = new THREE.Mesh(geometry, material);
+  
+  // Position: Bedrock uses origin as the corner, Three.js uses center
+  // Also need to account for inflate
+  mesh.position.set(
+    origin[0] + size[0] / 2,
+    origin[1] + size[1] / 2,
+    origin[2] + size[2] / 2
+  );
+  
+  // Handle rotation if present
+  if (cube.rotation && cube.pivot) {
+    const pivot = cube.pivot;
+    // Create a group to handle pivot rotation
+    const group = new THREE.Group();
+    group.position.set(pivot[0], pivot[1], pivot[2]);
+    
+    // Offset the mesh by the negative pivot
+    mesh.position.sub(new THREE.Vector3(pivot[0], pivot[1], pivot[2]));
+    
+    // Apply rotation (convert to radians)
+    group.rotation.set(
+      THREE.MathUtils.degToRad(cube.rotation[0] || 0),
+      THREE.MathUtils.degToRad(cube.rotation[1] || 0),
+      THREE.MathUtils.degToRad(cube.rotation[2] || 0)
+    );
+    
+    group.add(mesh);
+    return group;
+  }
+  
+  return mesh;
+}
+
+// Create a bone group with all its cubes
+function createBone(bone, textureWidth, textureHeight, colorIndex) {
+  const group = new THREE.Group();
+  group.name = bone.name;
+  
+  // Generate a color based on index for visual distinction
+  const colors = [
+    0x4a90d9, 0x7cb342, 0xffa726, 0xab47bc, 
+    0x26a69a, 0xef5350, 0x5c6bc0, 0x66bb6a
+  ];
+  const boneColor = colors[colorIndex % colors.length];
+  
+  // Add cubes
+  if (bone.cubes) {
+    for (const cube of bone.cubes) {
+      const cubeMesh = createCube(cube, textureWidth, textureHeight, boneColor);
+      group.add(cubeMesh);
+    }
+  }
+  
+  // Set bone pivot and rotation
+  if (bone.pivot) {
+    group.position.set(bone.pivot[0], bone.pivot[1], bone.pivot[2]);
+  }
+  
+  if (bone.rotation) {
+    group.rotation.set(
+      THREE.MathUtils.degToRad(bone.rotation[0] || 0),
+      THREE.MathUtils.degToRad(bone.rotation[1] || 0),
+      THREE.MathUtils.degToRad(bone.rotation[2] || 0)
+    );
+  }
+  
+  return group;
+}
+
+// Main render function
+function renderModel(geometry) {
+  const description = geometry.description || {};
+  const textureWidth = description.texture_width || 16;
+  const textureHeight = description.texture_height || 16;
+  const bones = geometry.bones || [];
+  
+  // Create scene
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x2d2d2d);
+  
+  // Create camera
+  const camera = new THREE.PerspectiveCamera(45, 800 / 600, 0.1, 1000);
+  
+  // Create renderer
+  const canvas = document.getElementById('renderCanvas');
+  const renderer = new THREE.WebGLRenderer({ 
+    canvas: canvas,
+    antialias: true,
+    preserveDrawingBuffer: true 
+  });
+  renderer.setSize(800, 600);
+  renderer.setPixelRatio(1);
+  
+  // Add lights
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambientLight);
+  
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  directionalLight.position.set(50, 100, 50);
+  scene.add(directionalLight);
+  
+  const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+  directionalLight2.position.set(-50, 50, -50);
+  scene.add(directionalLight2);
+  
+  // Create model group
+  const modelGroup = new THREE.Group();
+  
+  // Build bone hierarchy
+  const boneGroups = new Map();
+  
+  // First pass: create all bone groups
+  bones.forEach((bone, index) => {
+    const boneGroup = createBone(bone, textureWidth, textureHeight, index);
+    boneGroups.set(bone.name, boneGroup);
+  });
+  
+  // Second pass: establish parent-child relationships
+  bones.forEach((bone) => {
+    const boneGroup = boneGroups.get(bone.name);
+    if (bone.parent && boneGroups.has(bone.parent)) {
+      const parentGroup = boneGroups.get(bone.parent);
+      // Adjust position relative to parent
+      if (bone.pivot) {
+        const parentBone = bones.find(b => b.name === bone.parent);
+        if (parentBone && parentBone.pivot) {
+          boneGroup.position.sub(new THREE.Vector3(
+            parentBone.pivot[0],
+            parentBone.pivot[1],
+            parentBone.pivot[2]
+          ));
+        }
+      }
+      parentGroup.add(boneGroup);
+    } else {
+      modelGroup.add(boneGroup);
+    }
+  });
+  
+  scene.add(modelGroup);
+  
+  // Calculate bounding box to position camera
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  
+  // Position camera to see the whole model
+  const distance = maxDim * 2.5;
+  camera.position.set(
+    center.x + distance * 0.7,
+    center.y + distance * 0.5,
+    center.z + distance * 0.7
+  );
+  camera.lookAt(center);
+  
+  // Render
+  renderer.render(scene, camera);
+  
+  // Return canvas data URL
+  return canvas.toDataURL('image/png');
+}
+`;
+/**
+ * HTML template for the Three.js renderer page
+ */
+function getRendererHTML() {
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { margin: 0; background: #2d2d2d; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas" width="800" height="600"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    ${THREEJS_RENDER_SCRIPT}
+    
+    // This will be called from puppeteer
+    window.renderBedrockModel = function(geometryJson) {
+      try {
+        const geometry = JSON.parse(geometryJson);
+        return { success: true, dataUrl: renderModel(geometry) };
+      } catch (e) {
+        return { success: false, error: e.message || String(e) };
+      }
+    };
+    
+    // Signal that the page is ready
+    window.rendererReady = true;
+  </script>
+</body>
+</html>`;
+}
+/**
+ * Render a Bedrock geometry model using Three.js
+ */
+async function renderModelWithThreeJS(geometryPath, texturePath, outputPath, browser) {
+    let page = null;
+    try {
+        // Read the geometry file
+        const geoContent = await fs.readFile(geometryPath, 'utf-8');
+        const geoJson = JSON.parse(geoContent);
+        // Get the first geometry
+        const geometries = geoJson['minecraft:geometry'];
+        if (!geometries || geometries.length === 0) {
+            core.warning(`No geometry found in ${geometryPath}`);
+            return false;
+        }
+        const geometry = geometries[0];
+        // Create page
+        page = await browser.newPage();
+        await page.setViewport({ width: 800, height: 600 });
+        // Load the renderer HTML
+        await page.setContent(getRendererHTML(), { waitUntil: 'networkidle0' });
+        // Wait for Three.js and our script to load
+        await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
+        core.info('Three.js renderer ready');
+        // Call the render function
+        const result = await page.evaluate((geoJson) => {
+            return window.renderBedrockModel(geoJson);
+        }, JSON.stringify(geometry));
+        if (!result.success) {
+            core.warning(`Three.js render failed: ${result.error}`);
+            return false;
+        }
+        if (result.dataUrl) {
+            // Convert data URL to buffer and save
+            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+            await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
+            core.info(`Saved render to ${outputPath}`);
+            return true;
+        }
+        return false;
+    }
+    catch (e) {
+        core.warning(`Three.js render error: ${e}`);
+        return false;
+    }
+    finally {
+        if (page) {
+            await page.close().catch(() => { });
+        }
+    }
+}
+/**
+ * Render from a BBModel file (for backward compatibility during transition)
+ */
+async function renderBBModelWithThreeJS(bbmodelPath, outputPath, browser) {
+    let page = null;
+    try {
+        // Read the BBModel file
+        const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
+        const bbmodel = JSON.parse(bbmodelContent);
+        // Extract geometry from BBModel format
+        // BBModel stores bones in 'elements' (confusingly named)
+        const geometry = {
+            description: {
+                identifier: bbmodel.name || 'model',
+                texture_width: bbmodel.resolution?.width || 16,
+                texture_height: bbmodel.resolution?.height || 16,
+            },
+            bones: bbmodel.elements || [],
+        };
+        // Create page
+        page = await browser.newPage();
+        await page.setViewport({ width: 800, height: 600 });
+        // Load the renderer HTML
+        await page.setContent(getRendererHTML(), { waitUntil: 'networkidle0' });
+        // Wait for Three.js and our script to load
+        await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
+        core.info('Three.js renderer ready');
+        // Call the render function
+        const result = await page.evaluate((geoJson) => {
+            return window.renderBedrockModel(geoJson);
+        }, JSON.stringify(geometry));
+        if (!result.success) {
+            core.warning(`Three.js render failed: ${result.error}`);
+            return false;
+        }
+        if (result.dataUrl) {
+            // Convert data URL to buffer and save
+            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+            await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
+            core.info(`Saved render to ${outputPath}`);
+            return true;
+        }
+        return false;
+    }
+    catch (e) {
+        core.warning(`Three.js render error: ${e}`);
+        return false;
+    }
+    finally {
+        if (page) {
+            await page.close().catch(() => { });
+        }
+    }
+}
+/**
+ * Render directly from a Bedrock geometry object
+ * This is the preferred method as it skips the BBModel intermediate format
+ */
+async function renderGeometryWithThreeJS(geometry, outputPath, browser) {
+    let page = null;
+    try {
+        // Create page
+        page = await browser.newPage();
+        await page.setViewport({ width: 800, height: 600 });
+        // Load the renderer HTML
+        await page.setContent(getRendererHTML(), { waitUntil: 'networkidle0' });
+        // Wait for Three.js and our script to load
+        await page.waitForFunction(() => window.rendererReady === true, { timeout: 30000 });
+        // Call the render function
+        const result = await page.evaluate((geoJson) => {
+            return window.renderBedrockModel(geoJson);
+        }, JSON.stringify(geometry));
+        if (!result.success) {
+            core.warning(`Three.js render failed: ${result.error}`);
+            return false;
+        }
+        if (result.dataUrl) {
+            // Convert data URL to buffer and save
+            const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+            await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
+            return true;
+        }
+        return false;
+    }
+    catch (e) {
+        core.warning(`Three.js render error: ${e}`);
+        return false;
+    }
+    finally {
+        if (page) {
+            await page.close().catch(() => { });
+        }
     }
 }
 
