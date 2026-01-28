@@ -119,13 +119,35 @@ async function renderModelWithBlockbenchWeb(
         if (!win.Codecs?.bedrock?.parse) {
           return { success: false, error: 'Codecs.bedrock.parse not available' };
         }
-        if (!win.Formats?.bedrock?.new) {
-          return { success: false, error: 'Formats.bedrock.new not available' };
+        
+        // Try multiple approaches to create a project
+        let projectCreated = false;
+        
+        // Approach 1: Try Formats.bedrock.new() with error handling
+        if (win.Formats?.bedrock?.new) {
+          try {
+            win.Formats.bedrock.new();
+            projectCreated = true;
+          } catch (e: any) {
+            console.log('Formats.bedrock.new() failed:', e.message);
+          }
         }
         
-        // Create a new Bedrock project using the format's new() method
-        // (newProject() doesn't work in web version due to missing new_tab)
-        win.Formats.bedrock.new();
+        // Approach 2: If that failed, try creating with ModelProject directly
+        if (!projectCreated && win.ModelProject && win.Formats?.bedrock) {
+          try {
+            new win.ModelProject(win.Formats.bedrock);
+            projectCreated = true;
+          } catch (e: any) {
+            console.log('ModelProject creation failed:', e.message);
+          }
+        }
+        
+        // Approach 3: Just try parsing directly - Blockbench might auto-create project
+        if (!projectCreated) {
+          console.log('Attempting parse without explicit project creation');
+        }
+        
         await new Promise(resolve => setTimeout(resolve, 500));
         
         // Convert our bbmodel format to proper Bedrock geometry format
