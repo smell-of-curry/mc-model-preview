@@ -594,3 +594,486 @@ export async function renderGeometryWithThreeJS(
 
 // Export types for use in other modules
 export type { BedrockGeometry, BedrockBone, BedrockCube, BedrockGeoFile };
+
+// Animation rendering script that supports bone transforms
+const THREEJS_ANIMATION_SCRIPT = `
+// Store references for animation
+let modelBoneGroups = new Map();
+let modelBoneData = new Map();
+let currentScene = null;
+let currentCamera = null;
+let currentRenderer = null;
+let modelCenter = null;
+
+// Create a textured cube mesh from Bedrock cube data
+function createTexturedCubeForAnim(cube, bonePivot, textureWidth, textureHeight, texture, fallbackColor) {
+  const origin = cube.origin || [0, 0, 0];
+  const size = cube.size || [1, 1, 1];
+  const inflate = cube.inflate || 0;
+  
+  const w = Math.abs(size[0]) + inflate * 2;
+  const h = Math.abs(size[1]) + inflate * 2;
+  const d = Math.abs(size[2]) + inflate * 2;
+  
+  const uv = cube.uv;
+  const isPerFaceUV = uv && typeof uv === 'object' && !Array.isArray(uv);
+  const isBoxUV = uv && Array.isArray(uv);
+  
+  let material;
+  
+  if (texture && (isPerFaceUV || isBoxUV)) {
+    const materials = [];
+    
+    if (isPerFaceUV) {
+      const faces = ['east', 'west', 'up', 'down', 'south', 'north'];
+      
+      for (let i = 0; i < 6; i++) {
+        const faceName = faces[i];
+        const faceUV = uv[faceName];
+        
+        if (faceUV && faceUV.uv && faceUV.uv_size) {
+          const faceTexture = texture.clone();
+          faceTexture.needsUpdate = true;
+          faceTexture.magFilter = THREE.NearestFilter;
+          faceTexture.minFilter = THREE.NearestFilter;
+          
+          let uvX = faceUV.uv[0];
+          let uvY = faceUV.uv[1];
+          let uvW = faceUV.uv_size[0];
+          let uvH = faceUV.uv_size[1];
+          
+          if (uvW < 0) { uvX = uvX + uvW; uvW = Math.abs(uvW); }
+          if (uvH < 0) { uvY = uvY + uvH; uvH = Math.abs(uvH); }
+          
+          const offsetU = uvX / textureWidth;
+          const offsetV = 1 - (uvY + uvH) / textureHeight;
+          const repeatU = uvW / textureWidth;
+          const repeatV = uvH / textureHeight;
+          
+          faceTexture.offset.set(offsetU, offsetV);
+          faceTexture.repeat.set(repeatU, repeatV);
+          
+          materials.push(new THREE.MeshStandardMaterial({
+            map: faceTexture,
+            transparent: true,
+            alphaTest: 0.1,
+            side: THREE.DoubleSide,
+          }));
+        } else {
+          materials.push(new THREE.MeshStandardMaterial({ color: fallbackColor, transparent: true }));
+        }
+      }
+      material = materials;
+    } else if (isBoxUV) {
+      material = new THREE.MeshStandardMaterial({
+        map: texture,
+        transparent: true,
+        alphaTest: 0.1,
+        side: THREE.DoubleSide,
+      });
+    }
+  } else {
+    material = new THREE.MeshStandardMaterial({
+      color: fallbackColor,
+      roughness: 0.8,
+      metalness: 0.1,
+    });
+  }
+  
+  const geometry = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geometry, material);
+  
+  mesh.position.set(
+    origin[0] + size[0] / 2 - bonePivot[0],
+    origin[1] + size[1] / 2 - bonePivot[1],
+    origin[2] + size[2] / 2 - bonePivot[2]
+  );
+  
+  if (cube.rotation && cube.pivot) {
+    const cubePivot = cube.pivot;
+    const rotGroup = new THREE.Group();
+    rotGroup.position.set(
+      cubePivot[0] - bonePivot[0],
+      cubePivot[1] - bonePivot[1],
+      cubePivot[2] - bonePivot[2]
+    );
+    mesh.position.set(
+      origin[0] + size[0] / 2 - cubePivot[0],
+      origin[1] + size[1] / 2 - cubePivot[1],
+      origin[2] + size[2] / 2 - cubePivot[2]
+    );
+    rotGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(cube.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(cube.rotation[1] || 0)),
+      THREE.MathUtils.degToRad(cube.rotation[2] || 0)
+    );
+    rotGroup.add(mesh);
+    return rotGroup;
+  }
+  
+  return mesh;
+}
+
+// Create a bone group for animation
+function createBoneForAnim(bone, textureWidth, textureHeight, texture, colorIndex) {
+  const group = new THREE.Group();
+  group.name = bone.name;
+  
+  // Store original transforms for reset
+  group.userData.originalRotation = bone.rotation ? [...bone.rotation] : [0, 0, 0];
+  group.userData.originalPosition = bone.pivot ? [...bone.pivot] : [0, 0, 0];
+  group.userData.originalScale = [1, 1, 1];
+  
+  const colors = [0x4a90d9, 0x7cb342, 0xffa726, 0xab47bc, 0x26a69a, 0xef5350, 0x5c6bc0, 0x66bb6a];
+  const boneColor = colors[colorIndex % colors.length];
+  const bonePivot = bone.pivot || [0, 0, 0];
+  
+  if (bone.cubes) {
+    for (const cube of bone.cubes) {
+      const cubeMesh = createTexturedCubeForAnim(cube, bonePivot, textureWidth, textureHeight, texture, boneColor);
+      group.add(cubeMesh);
+    }
+  }
+  
+  group.position.set(bonePivot[0], bonePivot[1], bonePivot[2]);
+  
+  if (bone.rotation) {
+    group.rotation.set(
+      THREE.MathUtils.degToRad(-(bone.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(bone.rotation[1] || 0)),
+      THREE.MathUtils.degToRad(bone.rotation[2] || 0)
+    );
+  }
+  
+  return group;
+}
+
+// Initialize the animation renderer with a model
+async function initAnimationRenderer(geometry, textureDataUrl, canvasWidth, canvasHeight) {
+  const description = geometry.description || {};
+  const textureWidth = description.texture_width || 64;
+  const textureHeight = description.texture_height || 64;
+  const bones = geometry.bones || [];
+  
+  // Create scene
+  currentScene = new THREE.Scene();
+  currentScene.background = new THREE.Color(0x2d2d2d);
+  
+  // Create camera
+  currentCamera = new THREE.PerspectiveCamera(45, canvasWidth / canvasHeight, 0.1, 1000);
+  
+  // Create renderer
+  const canvas = document.getElementById('renderCanvas');
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+  currentRenderer = new THREE.WebGLRenderer({ 
+    canvas: canvas,
+    antialias: true,
+    preserveDrawingBuffer: true 
+  });
+  currentRenderer.setSize(canvasWidth, canvasHeight);
+  currentRenderer.setPixelRatio(1);
+  
+  // Add lights
+  currentScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+  const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight1.position.set(50, 100, 50);
+  currentScene.add(dirLight1);
+  const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
+  dirLight2.position.set(-50, 50, -50);
+  currentScene.add(dirLight2);
+  
+  // Load texture
+  let texture = null;
+  if (textureDataUrl) {
+    const textureLoader = new THREE.TextureLoader();
+    texture = await new Promise((resolve) => {
+      textureLoader.load(
+        textureDataUrl,
+        (tex) => {
+          tex.magFilter = THREE.NearestFilter;
+          tex.minFilter = THREE.NearestFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          resolve(tex);
+        },
+        undefined,
+        () => resolve(null)
+      );
+    });
+  }
+  
+  // Create model
+  const modelGroup = new THREE.Group();
+  modelBoneGroups = new Map();
+  modelBoneData = new Map();
+  
+  bones.forEach((bone) => modelBoneData.set(bone.name, bone));
+  
+  bones.forEach((bone, index) => {
+    const boneGroup = createBoneForAnim(bone, textureWidth, textureHeight, texture, index);
+    modelBoneGroups.set(bone.name, boneGroup);
+  });
+  
+  bones.forEach((bone) => {
+    const boneGroup = modelBoneGroups.get(bone.name);
+    if (bone.parent && modelBoneGroups.has(bone.parent)) {
+      const parentGroup = modelBoneGroups.get(bone.parent);
+      const parentBone = modelBoneData.get(bone.parent);
+      if (parentBone && parentBone.pivot) {
+        const childPivot = bone.pivot || [0, 0, 0];
+        boneGroup.position.set(
+          childPivot[0] - parentBone.pivot[0],
+          childPivot[1] - parentBone.pivot[1],
+          childPivot[2] - parentBone.pivot[2]
+        );
+      }
+      parentGroup.add(boneGroup);
+    } else {
+      modelGroup.add(boneGroup);
+    }
+  });
+  
+  currentScene.add(modelGroup);
+  
+  // Position camera
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  modelCenter = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const distance = maxDim * 2.5;
+  
+  currentCamera.position.set(
+    modelCenter.x - distance * 0.7,
+    modelCenter.y + distance * 0.5,
+    modelCenter.z - distance * 0.7
+  );
+  currentCamera.lookAt(modelCenter);
+  
+  return { success: true };
+}
+
+// Apply bone transforms from animation evaluation
+function applyBoneTransforms(boneTransforms) {
+  for (const [boneName, transform] of Object.entries(boneTransforms)) {
+    const boneGroup = modelBoneGroups.get(boneName);
+    if (!boneGroup) continue;
+    
+    const originalBone = modelBoneData.get(boneName);
+    const originalRotation = boneGroup.userData.originalRotation;
+    const originalPosition = boneGroup.userData.originalPosition;
+    
+    // Apply rotation (add to base rotation)
+    const rot = transform.rotation || [0, 0, 0];
+    boneGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(originalRotation[0] + rot[0])),
+      THREE.MathUtils.degToRad(-(originalRotation[1] + rot[1])),
+      THREE.MathUtils.degToRad(originalRotation[2] + rot[2])
+    );
+    
+    // Apply position offset
+    const pos = transform.position || [0, 0, 0];
+    
+    // Check if this bone has a parent
+    if (originalBone && originalBone.parent && modelBoneData.has(originalBone.parent)) {
+      const parentBone = modelBoneData.get(originalBone.parent);
+      if (parentBone && parentBone.pivot) {
+        boneGroup.position.set(
+          originalPosition[0] - parentBone.pivot[0] + pos[0],
+          originalPosition[1] - parentBone.pivot[1] + pos[1],
+          originalPosition[2] - parentBone.pivot[2] + pos[2]
+        );
+      } else {
+        boneGroup.position.set(
+          originalPosition[0] + pos[0],
+          originalPosition[1] + pos[1],
+          originalPosition[2] + pos[2]
+        );
+      }
+    } else {
+      boneGroup.position.set(
+        originalPosition[0] + pos[0],
+        originalPosition[1] + pos[1],
+        originalPosition[2] + pos[2]
+      );
+    }
+    
+    // Apply scale
+    const scale = transform.scale || [1, 1, 1];
+    boneGroup.scale.set(scale[0], scale[1], scale[2]);
+  }
+}
+
+// Reset all bone transforms to original
+function resetBoneTransforms() {
+  for (const [boneName, boneGroup] of modelBoneGroups) {
+    const originalBone = modelBoneData.get(boneName);
+    const originalRotation = boneGroup.userData.originalRotation;
+    const originalPosition = boneGroup.userData.originalPosition;
+    
+    boneGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(originalRotation[0])),
+      THREE.MathUtils.degToRad(-(originalRotation[1])),
+      THREE.MathUtils.degToRad(originalRotation[2])
+    );
+    
+    if (originalBone && originalBone.parent && modelBoneData.has(originalBone.parent)) {
+      const parentBone = modelBoneData.get(originalBone.parent);
+      if (parentBone && parentBone.pivot) {
+        boneGroup.position.set(
+          originalPosition[0] - parentBone.pivot[0],
+          originalPosition[1] - parentBone.pivot[1],
+          originalPosition[2] - parentBone.pivot[2]
+        );
+      } else {
+        boneGroup.position.set(originalPosition[0], originalPosition[1], originalPosition[2]);
+      }
+    } else {
+      boneGroup.position.set(originalPosition[0], originalPosition[1], originalPosition[2]);
+    }
+    
+    boneGroup.scale.set(1, 1, 1);
+  }
+}
+
+// Render a single frame and return as data URL
+function renderFrame() {
+  currentRenderer.render(currentScene, currentCamera);
+  return document.getElementById('renderCanvas').toDataURL('image/png');
+}
+
+// Render a frame with specific bone transforms
+function renderAnimationFrame(boneTransforms) {
+  applyBoneTransforms(boneTransforms);
+  return renderFrame();
+}
+`;
+
+/**
+ * HTML template for the animation renderer page
+ */
+function getAnimationRendererHTML(canvasWidth: number, canvasHeight: number): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { margin: 0; background: #2d2d2d; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas" width="${canvasWidth}" height="${canvasHeight}"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    ${THREEJS_ANIMATION_SCRIPT}
+    
+    window.initAnimationRenderer = initAnimationRenderer;
+    window.renderAnimationFrame = renderAnimationFrame;
+    window.resetBoneTransforms = resetBoneTransforms;
+    window.renderFrame = renderFrame;
+    window.animRendererReady = true;
+  </script>
+</body>
+</html>`;
+}
+
+/**
+ * Render animation frames for a model
+ * Returns an array of PNG buffers, one per frame
+ */
+export async function renderAnimationFrames(
+  geometryPath: string,
+  texturePath: string | null,
+  animationData: import('./types').BedrockAnimation,
+  frameTimestamps: number[],
+  browser: Browser,
+  options: { width?: number; height?: number } = {}
+): Promise<Buffer[]> {
+  const { width = 400, height = 300 } = options;
+  let page: Page | null = null;
+  const frames: Buffer[] = [];
+
+  try {
+    // Read the geometry file
+    const geoContent = await fs.readFile(geometryPath, 'utf-8');
+    const geoJson: BedrockGeoFile = JSON.parse(geoContent);
+
+    const geometries = geoJson['minecraft:geometry'];
+    if (!geometries || geometries.length === 0) {
+      core.warning(`No geometry found in ${geometryPath}`);
+      return [];
+    }
+    const geometry = geometries[0];
+
+    // Load texture
+    const textureDataUrl = texturePath ? await loadTextureAsDataURL(texturePath) : null;
+
+    // Create page
+    page = await browser.newPage();
+    await page.setViewport({ width, height });
+
+    // Load the animation renderer HTML
+    await page.setContent(getAnimationRendererHTML(width, height), { waitUntil: 'networkidle0' });
+
+    // Wait for renderer to be ready
+    await page.waitForFunction(() => (window as any).animRendererReady === true, { timeout: 30000 });
+
+    core.info('Animation renderer ready');
+
+    // Initialize the renderer with the model
+    const initResult = await page.evaluate(
+      async (geoJson: string, textureUrl: string | null, w: number, h: number) => {
+        const geometry = JSON.parse(geoJson);
+        return await (window as any).initAnimationRenderer(geometry, textureUrl, w, h);
+      },
+      JSON.stringify(geometry),
+      textureDataUrl,
+      width,
+      height
+    );
+
+    if (!initResult.success) {
+      core.warning('Failed to initialize animation renderer');
+      return [];
+    }
+
+    // Import animation parser
+    const { evaluateAnimation } = await import('./animation-parser');
+
+    // Render each frame
+    for (let i = 0; i < frameTimestamps.length; i++) {
+      const time = frameTimestamps[i];
+      const evaluation = evaluateAnimation(animationData, time);
+
+      // Render the frame with bone transforms
+      const dataUrl = await page.evaluate((transforms: string) => {
+        const boneTransforms = JSON.parse(transforms);
+        return (window as any).renderAnimationFrame(boneTransforms);
+      }, JSON.stringify(evaluation.bones));
+
+      if (dataUrl) {
+        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+        frames.push(Buffer.from(base64Data, 'base64'));
+      }
+
+      if ((i + 1) % 10 === 0) {
+        core.info(`Rendered frame ${i + 1}/${frameTimestamps.length}`);
+      }
+    }
+
+    core.info(`Rendered ${frames.length} animation frames`);
+    return frames;
+  } catch (e) {
+    core.warning(`Animation render error: ${e}`);
+    return [];
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Load texture path helper - exported for use in renderer.ts
+ */
+export { loadTextureAsDataURL };

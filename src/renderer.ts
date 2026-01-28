@@ -4,12 +4,15 @@ import * as path from 'path';
 import * as io from '@actions/io';
 import * as fs from 'fs/promises';
 import * as github from '@actions/github';
-import { Entity } from './types';
+import { Entity, ChangedAnimation, AnimationFile } from './types';
 import { createBBFile, hasShinyTexture, TextureVariant } from './blockbench';
 import { uploadImages } from './image-hosting';
-import { postComment } from './comment';
+import { postComment, AnimationUrlSet } from './comment';
 import { checkout } from './git';
-import { renderBBModelWithThreeJS } from './threejs-renderer';
+import { renderBBModelWithThreeJS, renderAnimationFrames, loadTextureAsDataURL } from './threejs-renderer';
+import { getAnimationDuration } from './animation-parser';
+import { createGifFromFrames, GIF_CONFIG, calculateFrameTimestamps } from './gif-encoder';
+import { findChangedAnimations } from './differ';
 
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
@@ -213,6 +216,14 @@ export async function renderChanges(
     const listAfter = await fs.readdir(tempDir);
     core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
     
+    // Render animation GIFs for changed animations
+    const animationUrls = await renderChangedAnimations(
+      prEntities,
+      resourcePackPath,
+      tempDir,
+      browser
+    );
+    
     const publicUrls = await uploadImages(tempDir, github.context.issue.number);
     core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
     
@@ -265,11 +276,223 @@ export async function renderChanges(
       (u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0)
     );
     
-    await postComment(nonEmptyRows);
+    // Build animation URL sets from rendered GIFs
+    const animationUrlSets: AnimationUrlSet[] = animationUrls.map((anim) => {
+      const gifPath = path.join(tempDir, anim.gifFilename);
+      const gifUrl = publicUrls[gifPath] || '';
+      
+      return {
+        entityIdentifier: anim.entityIdentifier,
+        animationIdentifier: anim.animationIdentifier,
+        gifUrl,
+        isNew: anim.isNew,
+      };
+    }).filter((a) => a.gifUrl.length > 0);
+    
+    await postComment(nonEmptyRows, animationUrlSets);
     
     core.info('Rendering process complete.');
   } finally {
     // Close the browser
     await browser.close();
   }
+}
+
+interface RenderedAnimation {
+  entityIdentifier: string;
+  animationIdentifier: string;
+  gifFilename: string;
+  isNew: boolean;
+}
+
+/**
+ * Render GIFs for changed animations
+ */
+async function renderChangedAnimations(
+  entities: Entity[],
+  resourcePackPath: string,
+  tempDir: string,
+  browser: import('puppeteer-core').Browser
+): Promise<RenderedAnimation[]> {
+  const renderedAnimations: RenderedAnimation[] = [];
+  
+  // Build a map of animation identifier to entity and animation data
+  const animationMap = new Map<string, {
+    entity: Entity;
+    animationFile: string;
+    animationData: import('./types').BedrockAnimation;
+  }>();
+  
+  for (const entity of entities) {
+    for (const animFile of entity.animationFiles) {
+      try {
+        const animPath = path.join(resourcePackPath, animFile);
+        const content = await fs.readFile(animPath, 'utf-8');
+        const animFileData = JSON.parse(content) as AnimationFile;
+        
+        if (animFileData.animations) {
+          for (const [animId, animData] of Object.entries(animFileData.animations)) {
+            animationMap.set(animId, {
+              entity,
+              animationFile: animFile,
+              animationData: animData,
+            });
+          }
+        }
+      } catch (error) {
+        core.warning(`Failed to parse animation file ${animFile}: ${error}`);
+      }
+    }
+  }
+  
+  // For now, render idle animations for entities with animation changes
+  // In a full implementation, we'd use findChangedAnimations to determine which specific animations changed
+  const processedEntities = new Set<string>();
+  
+  for (const entity of entities) {
+    if (processedEntities.has(entity.identifier)) continue;
+    if (entity.animationFiles.length === 0) continue;
+    
+    // Find an idle animation for this entity
+    const idleAnimId = findIdleAnimation(entity.identifier, animationMap);
+    if (!idleAnimId) continue;
+    
+    const animInfo = animationMap.get(idleAnimId);
+    if (!animInfo) continue;
+    
+    core.info(`Rendering animation ${idleAnimId} for ${entity.identifier}`);
+    
+    try {
+      const result = await renderAnimationGif(
+        entity,
+        idleAnimId,
+        animInfo.animationData,
+        resourcePackPath,
+        tempDir,
+        browser
+      );
+      
+      if (result) {
+        renderedAnimations.push(result);
+        processedEntities.add(entity.identifier);
+      }
+    } catch (error) {
+      core.warning(`Failed to render animation ${idleAnimId}: ${error}`);
+    }
+  }
+  
+  return renderedAnimations;
+}
+
+/**
+ * Find an idle animation for an entity
+ */
+function findIdleAnimation(
+  entityIdentifier: string,
+  animationMap: Map<string, { entity: Entity; animationFile: string; animationData: import('./types').BedrockAnimation }>
+): string | null {
+  // Extract the entity name from the identifier (e.g., "pokemon:ferroseed" -> "ferroseed")
+  const entityName = entityIdentifier.split(':').pop() || entityIdentifier;
+  
+  // Priority order for idle animations
+  const idlePatterns = [
+    `animation.${entityName}.ground_idle`,
+    `animation.${entityName}.idle`,
+    `animation.${entityName}.water_idle`,
+  ];
+  
+  for (const pattern of idlePatterns) {
+    if (animationMap.has(pattern)) {
+      return pattern;
+    }
+  }
+  
+  // Fall back to any animation containing "idle" for this entity
+  for (const [animId, info] of animationMap) {
+    if (info.entity.identifier === entityIdentifier && animId.includes('idle')) {
+      return animId;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Render a single animation as a GIF
+ */
+async function renderAnimationGif(
+  entity: Entity,
+  animationId: string,
+  animationData: import('./types').BedrockAnimation,
+  resourcePackPath: string,
+  tempDir: string,
+  browser: import('puppeteer-core').Browser
+): Promise<RenderedAnimation | null> {
+  if (entity.geometryFiles.length === 0) {
+    core.warning(`No geometry files for ${entity.identifier}`);
+    return null;
+  }
+  
+  const geometryPath = path.join(resourcePackPath, entity.geometryFiles[0]);
+  
+  // Find the best texture
+  let texturePath: string | null = null;
+  const textureKeys = Object.keys(entity.textureMap);
+  const preferredKey = textureKeys.find((k) => k === 'default') ||
+    textureKeys.find((k) => k === 'male_default') ||
+    textureKeys.find((k) => !k.startsWith('shiny_') && k !== 'evo_aura');
+  
+  if (preferredKey && entity.textureMap[preferredKey]) {
+    let txPath = entity.textureMap[preferredKey];
+    if (!txPath.endsWith('.png') && !txPath.endsWith('.jpg')) {
+      txPath = txPath + '.png';
+    }
+    texturePath = path.join(resourcePackPath, txPath);
+  }
+  
+  // Calculate frame timestamps
+  const duration = getAnimationDuration(animationData);
+  const frameTimestamps = calculateFrameTimestamps(duration);
+  
+  core.info(`Rendering ${frameTimestamps.length} frames for ${animationId} (duration: ${duration}s)`);
+  
+  // Render frames
+  const frames = await renderAnimationFrames(
+    geometryPath,
+    texturePath,
+    animationData,
+    frameTimestamps,
+    browser,
+    { width: GIF_CONFIG.width, height: GIF_CONFIG.height }
+  );
+  
+  if (frames.length === 0) {
+    core.warning(`No frames rendered for ${animationId}`);
+    return null;
+  }
+  
+  // Create GIF
+  const safeAnimId = animationId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const gifFilename = `${safeAnimId}.gif`;
+  const gifPath = path.join(tempDir, gifFilename);
+  
+  const success = await createGifFromFrames(frames, gifPath, {
+    width: GIF_CONFIG.width,
+    height: GIF_CONFIG.height,
+    delay: GIF_CONFIG.frameDelay,
+  });
+  
+  if (!success) {
+    core.warning(`Failed to create GIF for ${animationId}`);
+    return null;
+  }
+  
+  core.info(`Created animation GIF: ${gifPath}`);
+  
+  return {
+    entityIdentifier: entity.identifier,
+    animationIdentifier: animationId,
+    gifFilename,
+    isNew: false, // TODO: Determine if this is a new animation
+  };
 }

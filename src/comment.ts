@@ -11,15 +11,28 @@ export interface ImageUrlSet {
   hasShiny?: boolean;
 }
 
-export async function postComment(imageUrls: ImageUrlSet[]): Promise<void> {
+export interface AnimationUrlSet {
+  entityIdentifier: string;
+  animationIdentifier: string;
+  gifUrl: string;
+  isNew?: boolean;
+}
+
+export async function postComment(
+  imageUrls: ImageUrlSet[],
+  animationUrls: AnimationUrlSet[] = []
+): Promise<void> {
   core.info('Generating PR comment...');
 
-  let body = `### Minecraft Model Preview\n\n`;
+  let body = `## Minecraft Model Preview\n\n`;
+  
+  // Model changes section
+  body += `### Model Changes\n\n`;
   body += `| Entity | Before | After |\n`;
   body += `|--------|--------|-------|\n`;
 
   if (imageUrls.length === 0) {
-    body += `| _No renderable changes detected or images missing_ |  |  |\n`;
+    body += `| _No renderable model changes detected_ |  |  |\n`;
   }
 
   for (const urlSet of imageUrls) {
@@ -41,6 +54,18 @@ export async function postComment(imageUrls: ImageUrlSet[]): Promise<void> {
         ? `<img src="${urlSet.headShiny}" width="200" />`
         : '_Missing_';
       body += `| \`${urlSet.identifier}\` (shiny) | ${beforeShinyCell} | ${afterShinyCell} |\n`;
+    }
+  }
+
+  // Animation previews section
+  if (animationUrls.length > 0) {
+    body += `\n### Animation Previews\n\n`;
+    body += `| Entity | Animation | Preview |\n`;
+    body += `|--------|-----------|:-------:|\n`;
+    
+    for (const animUrl of animationUrls) {
+      const newBadge = animUrl.isNew ? ' _(new)_' : '';
+      body += `| \`${animUrl.entityIdentifier}\` | \`${animUrl.animationIdentifier}\`${newBadge} | <img src="${animUrl.gifUrl}" width="200" /> |\n`;
     }
   }
 

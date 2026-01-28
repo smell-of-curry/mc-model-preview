@@ -73455,6 +73455,231 @@ function socketOnError() {
 
 /***/ }),
 
+/***/ 69609:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Animation parser for Bedrock animations
+ * Handles Molang expression evaluation and keyframe interpolation
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.evaluateMolang = evaluateMolang;
+exports.evaluateAnimation = evaluateAnimation;
+exports.getAnimationDuration = getAnimationDuration;
+exports.isAnimationLooping = isAnimationLooping;
+/**
+ * Molang expression evaluator
+ * Supports a subset of Molang needed for animations:
+ * - q.anim_time - current animation time
+ * - math.sin(), math.cos(), math.abs() - math functions
+ * - Basic arithmetic operators
+ */
+function evaluateMolang(expression, animTime) {
+    // Replace Molang variables
+    let expr = expression
+        .replace(/q\.anim_time/g, String(animTime))
+        .replace(/query\.anim_time/g, String(animTime));
+    // Replace Molang math functions with JavaScript equivalents
+    expr = expr
+        .replace(/math\.sin\(/g, 'Math.sin(')
+        .replace(/math\.cos\(/g, 'Math.cos(')
+        .replace(/math\.abs\(/g, 'Math.abs(')
+        .replace(/math\.sqrt\(/g, 'Math.sqrt(')
+        .replace(/math\.floor\(/g, 'Math.floor(')
+        .replace(/math\.ceil\(/g, 'Math.ceil(')
+        .replace(/math\.round\(/g, 'Math.round(')
+        .replace(/math\.min\(/g, 'Math.min(')
+        .replace(/math\.max\(/g, 'Math.max(')
+        .replace(/math\.clamp\(/g, 'clamp(')
+        .replace(/math\.lerp\(/g, 'lerp(')
+        .replace(/math\.pow\(/g, 'Math.pow(')
+        .replace(/math\.pi/g, 'Math.PI');
+    // Create a safe evaluation context with helper functions
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+    const lerp = (a, b, t) => a + (b - a) * t;
+    try {
+        // Use Function constructor to evaluate the expression safely
+        const fn = new Function('Math', 'clamp', 'lerp', `return (${expr});`);
+        const result = fn(Math, clamp, lerp);
+        return typeof result === 'number' && !isNaN(result) ? result : 0;
+    }
+    catch {
+        // If evaluation fails, return 0
+        return 0;
+    }
+}
+/**
+ * Parse a Bedrock animation value at a specific time
+ * Handles static values, Molang expressions, and keyframe objects
+ */
+function parseAnimationValue(value, animTime, defaultValue = [0, 0, 0]) {
+    if (value === undefined)
+        return defaultValue;
+    // Static array value [x, y, z]
+    if (Array.isArray(value) && typeof value[0] === 'number') {
+        return value;
+    }
+    // Molang string expression (single string for all components - unusual but possible)
+    if (typeof value === 'string') {
+        const result = evaluateMolang(value, animTime);
+        return [result, result, result];
+    }
+    // Array of Molang strings [x_expr, y_expr, z_expr]
+    if (Array.isArray(value) && typeof value[0] === 'string') {
+        return [
+            evaluateMolang(value[0], animTime),
+            evaluateMolang(value[1], animTime),
+            evaluateMolang(value[2], animTime),
+        ];
+    }
+    // Keyframe object { "0.0": [...], "0.5": [...], ... }
+    if (typeof value === 'object' && !Array.isArray(value)) {
+        return interpolateKeyframes(value, animTime, defaultValue);
+    }
+    return defaultValue;
+}
+/**
+ * Interpolate between keyframes at a specific time
+ */
+function interpolateKeyframes(keyframes, animTime, defaultValue) {
+    const times = Object.keys(keyframes)
+        .map(parseFloat)
+        .filter((t) => !isNaN(t))
+        .sort((a, b) => a - b);
+    if (times.length === 0)
+        return defaultValue;
+    // Before first keyframe
+    if (animTime <= times[0]) {
+        return getKeyframeValue(keyframes[String(times[0])]);
+    }
+    // After last keyframe
+    if (animTime >= times[times.length - 1]) {
+        return getKeyframeValue(keyframes[String(times[times.length - 1])]);
+    }
+    // Find surrounding keyframes
+    let prevIndex = 0;
+    for (let i = 0; i < times.length - 1; i++) {
+        if (animTime >= times[i] && animTime < times[i + 1]) {
+            prevIndex = i;
+            break;
+        }
+    }
+    const prevTime = times[prevIndex];
+    const nextTime = times[prevIndex + 1];
+    const prevKey = keyframes[String(prevTime)];
+    const nextKey = keyframes[String(nextTime)];
+    const prevValue = getKeyframeValue(prevKey);
+    const nextValue = getKeyframeValue(nextKey);
+    const lerpMode = getKeyframeLerpMode(prevKey);
+    // Calculate interpolation factor
+    const t = (animTime - prevTime) / (nextTime - prevTime);
+    if (lerpMode === 'catmullrom') {
+        // For catmullrom, we need 4 control points
+        // Use previous and next neighbors if available, otherwise duplicate
+        const prevPrevTime = prevIndex > 0 ? times[prevIndex - 1] : prevTime;
+        const nextNextTime = prevIndex + 2 < times.length ? times[prevIndex + 2] : nextTime;
+        const p0 = getKeyframeValue(keyframes[String(prevPrevTime)]);
+        const p1 = prevValue;
+        const p2 = nextValue;
+        const p3 = getKeyframeValue(keyframes[String(nextNextTime)]);
+        return catmullRomInterpolate(p0, p1, p2, p3, t);
+    }
+    // Default to linear interpolation
+    return linearInterpolate(prevValue, nextValue, t);
+}
+/**
+ * Extract the value from a keyframe (handles both array and object formats)
+ */
+function getKeyframeValue(keyframe) {
+    if (Array.isArray(keyframe)) {
+        return keyframe;
+    }
+    if (keyframe && typeof keyframe === 'object' && 'post' in keyframe) {
+        return keyframe.post;
+    }
+    return [0, 0, 0];
+}
+/**
+ * Get the lerp mode from a keyframe
+ */
+function getKeyframeLerpMode(keyframe) {
+    if (keyframe &&
+        typeof keyframe === 'object' &&
+        'lerp_mode' in keyframe &&
+        keyframe.lerp_mode === 'catmullrom') {
+        return 'catmullrom';
+    }
+    return 'linear';
+}
+/**
+ * Linear interpolation between two 3D points
+ */
+function linearInterpolate(a, b, t) {
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+/**
+ * Catmull-Rom spline interpolation between 4 control points
+ */
+function catmullRomInterpolate(p0, p1, p2, p3, t) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const result = [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+        // Catmull-Rom spline formula
+        result[i] =
+            0.5 *
+                (2 * p1[i] +
+                    (-p0[i] + p2[i]) * t +
+                    (2 * p0[i] - 5 * p1[i] + 4 * p2[i] - p3[i]) * t2 +
+                    (-p0[i] + 3 * p1[i] - 3 * p2[i] + p3[i]) * t3);
+    }
+    return result;
+}
+/**
+ * Evaluate a Bedrock animation at a specific time
+ * Returns bone transforms for all animated bones
+ */
+function evaluateAnimation(animation, time) {
+    const result = { bones: {} };
+    // Handle looping
+    let animTime = time;
+    const length = animation.animation_length || 1;
+    if (animation.loop === true && length > 0) {
+        animTime = time % length;
+    }
+    else if (animation.loop === 'hold_on_last_frame' && time > length) {
+        animTime = length;
+    }
+    if (!animation.bones)
+        return result;
+    for (const [boneName, boneAnim] of Object.entries(animation.bones)) {
+        const transform = {
+            rotation: parseAnimationValue(boneAnim.rotation, animTime, [0, 0, 0]),
+            position: parseAnimationValue(boneAnim.position, animTime, [0, 0, 0]),
+            scale: parseAnimationValue(boneAnim.scale, animTime, [1, 1, 1]),
+        };
+        result.bones[boneName] = transform;
+    }
+    return result;
+}
+/**
+ * Get the duration of an animation
+ */
+function getAnimationDuration(animation) {
+    return animation.animation_length || 1;
+}
+/**
+ * Check if an animation is looping
+ */
+function isAnimationLooping(animation) {
+    return animation.loop === true;
+}
+
+
+/***/ }),
+
 /***/ 39402:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -73662,13 +73887,15 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.postComment = postComment;
 const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
-async function postComment(imageUrls) {
+async function postComment(imageUrls, animationUrls = []) {
     core.info('Generating PR comment...');
-    let body = `### Minecraft Model Preview\n\n`;
+    let body = `## Minecraft Model Preview\n\n`;
+    // Model changes section
+    body += `### Model Changes\n\n`;
     body += `| Entity | Before | After |\n`;
     body += `|--------|--------|-------|\n`;
     if (imageUrls.length === 0) {
-        body += `| _No renderable changes detected or images missing_ |  |  |\n`;
+        body += `| _No renderable model changes detected_ |  |  |\n`;
     }
     for (const urlSet of imageUrls) {
         // For new models, show "New" instead of a before image
@@ -73688,6 +73915,16 @@ async function postComment(imageUrls) {
                 ? `<img src="${urlSet.headShiny}" width="200" />`
                 : '_Missing_';
             body += `| \`${urlSet.identifier}\` (shiny) | ${beforeShinyCell} | ${afterShinyCell} |\n`;
+        }
+    }
+    // Animation previews section
+    if (animationUrls.length > 0) {
+        body += `\n### Animation Previews\n\n`;
+        body += `| Entity | Animation | Preview |\n`;
+        body += `|--------|-----------|:-------:|\n`;
+        for (const animUrl of animationUrls) {
+            const newBadge = animUrl.isNew ? ' _(new)_' : '';
+            body += `| \`${animUrl.entityIdentifier}\` | \`${animUrl.animationIdentifier}\`${newBadge} | <img src="${animUrl.gifUrl}" width="200" /> |\n`;
         }
     }
     const token = core.getInput('github-token');
@@ -73760,8 +73997,11 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getChangedFiles = getChangedFiles;
 exports.findAffectedEntities = findAffectedEntities;
+exports.findChangedAnimations = findChangedAnimations;
 const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
+const fs = __importStar(__nccwpck_require__(91943));
+const path = __importStar(__nccwpck_require__(16928));
 async function getChangedFiles() {
     const token = core.getInput('github-token');
     const octokit = github.getOctokit(token);
@@ -73795,6 +74035,747 @@ function findAffectedEntities(allEntities, changedFiles) {
         }
     }
     return Array.from(affectedEntities);
+}
+/**
+ * Load and parse an animation file
+ */
+async function loadAnimationFile(filePath) {
+    try {
+        const content = await fs.readFile(filePath, 'utf-8');
+        return JSON.parse(content);
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Compare two animations to check if they're different
+ */
+function areAnimationsDifferent(anim1, anim2) {
+    if (!anim1 && !anim2)
+        return false;
+    if (!anim1 || !anim2)
+        return true;
+    // Simple comparison using JSON stringify
+    // This catches any differences in the animation data
+    return JSON.stringify(anim1) !== JSON.stringify(anim2);
+}
+/**
+ * Find which specific animations changed between base and head versions
+ * Returns a list of changed animations with their entity associations
+ */
+async function findChangedAnimations(entities, changedFiles, resourcePackPath, baseResourcePackPath) {
+    const changedAnimations = [];
+    // Filter to only animation files that changed
+    const changedAnimationFiles = changedFiles.filter((f) => f.includes('/animations/') && f.endsWith('.animation.json'));
+    if (changedAnimationFiles.length === 0) {
+        return [];
+    }
+    core.info(`Found ${changedAnimationFiles.length} changed animation files`);
+    // Build a map of animation identifier -> entity
+    const animationToEntity = new Map();
+    for (const entity of entities) {
+        for (const animFile of entity.animationFiles) {
+            // Load the animation file to get animation identifiers
+            const fullPath = path.join(resourcePackPath, animFile);
+            const animData = await loadAnimationFile(fullPath);
+            if (animData?.animations) {
+                for (const animId of Object.keys(animData.animations)) {
+                    animationToEntity.set(animId, entity);
+                }
+            }
+        }
+    }
+    // Process each changed animation file
+    for (const changedFile of changedAnimationFiles) {
+        const headPath = path.join(resourcePackPath, changedFile);
+        const basePath = baseResourcePackPath
+            ? path.join(baseResourcePackPath, changedFile)
+            : null;
+        const headAnimations = await loadAnimationFile(headPath);
+        const baseAnimations = basePath ? await loadAnimationFile(basePath) : null;
+        if (!headAnimations?.animations)
+            continue;
+        // Check each animation in the file
+        for (const [animId, headAnim] of Object.entries(headAnimations.animations)) {
+            const baseAnim = baseAnimations?.animations?.[animId];
+            const isNew = !baseAnim;
+            const isChanged = areAnimationsDifferent(baseAnim, headAnim);
+            if (isNew || isChanged) {
+                const entity = animationToEntity.get(animId);
+                if (entity) {
+                    changedAnimations.push({
+                        entityIdentifier: entity.identifier,
+                        animationIdentifier: animId,
+                        animationFile: changedFile,
+                        isNew,
+                    });
+                    core.info(`Found ${isNew ? 'new' : 'changed'} animation: ${animId} for entity ${entity.identifier}`);
+                }
+                else {
+                    // Animation not associated with a known entity
+                    core.info(`Found ${isNew ? 'new' : 'changed'} animation: ${animId} (no entity association)`);
+                }
+            }
+        }
+        // Check for removed animations (in base but not in head)
+        if (baseAnimations?.animations) {
+            for (const animId of Object.keys(baseAnimations.animations)) {
+                if (!headAnimations.animations[animId]) {
+                    core.info(`Animation removed: ${animId}`);
+                }
+            }
+        }
+    }
+    return changedAnimations;
+}
+
+
+/***/ }),
+
+/***/ 67248:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * GIF encoder for animation previews
+ * Combines rendered frames into an animated GIF
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GIF_ENCODER_SCRIPT = exports.GIF_CONFIG = void 0;
+exports.calculateFrameCount = calculateFrameCount;
+exports.calculateFrameTimestamps = calculateFrameTimestamps;
+exports.createGifFromFrames = createGifFromFrames;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(91943));
+// GIF encoding configuration
+exports.GIF_CONFIG = {
+    width: 400,
+    height: 300,
+    frameRate: 20, // 20 FPS
+    frameDelay: 50, // 50ms between frames (1000ms / 20 FPS)
+    maxDuration: 3, // Max 3 seconds
+    quality: 10, // GIF quality (1-30, lower is better)
+    repeat: 0, // 0 = loop forever, -1 = no repeat
+};
+/**
+ * Calculate the number of frames needed for an animation
+ */
+function calculateFrameCount(duration) {
+    const cappedDuration = Math.min(duration, exports.GIF_CONFIG.maxDuration);
+    return Math.ceil(cappedDuration * exports.GIF_CONFIG.frameRate);
+}
+/**
+ * Calculate the timestamps for each frame
+ */
+function calculateFrameTimestamps(duration) {
+    const frameCount = calculateFrameCount(duration);
+    const cappedDuration = Math.min(duration, exports.GIF_CONFIG.maxDuration);
+    const timestamps = [];
+    for (let i = 0; i < frameCount; i++) {
+        timestamps.push((i / frameCount) * cappedDuration);
+    }
+    return timestamps;
+}
+/**
+ * GIF encoder script that runs in the browser context
+ * Uses gif.js library for encoding
+ */
+exports.GIF_ENCODER_SCRIPT = `
+// gif.js worker code will be inlined
+const GIF_WORKER_CODE = \`
+var GifWriter=function(){function e(e,r,t,n){var i=e.length,o=new a(256);var f;o.add(r),o.add(t);var v=8,d=1<<(v-1),l=d<<1,p=t+1,c=r,u=0,h=0;function s(e){for(u|=e<<h,h+=v;h>=8;)i[f++]=u&255,u>>=8,h-=8;return h>0}f=n,s(v-1);e:for(var g=0;g<i.length;++g){var w=e[g]&255,y=c<<8|w,b=o.get(y);if(b===-1){if(s(c),p===l+1&&v===12){s(r);for(var x=o.g,k=o.c,S=0,m=x.length;S<m;++S)x[S]=0;o.c=k=0;v=9;l=1<<(v-1);p=t+1}else{if(p===l+1){v++;l=1<<(v-1)}}o.add(y);c=w}else{c=b}}s(c);s(t);if(h>0){i[f++]=u}return f}function a(e){var r=this.g=[];var t=this.c=0;this.add=function(e){r[e]=++t};this.get=function(e){return r[e]||(-1)}}return e}();
+var frames=null,frame=0,width=0,height=0,delay=0,repeat=0,bgColor=null,quality=10,dither=false,palette=null;
+var outputBuffer=[];
+
+self.onmessage=function(e){
+  var d=e.data;
+  if(d.cmd==='init'){
+    width=d.width;height=d.height;delay=d.delay;repeat=d.repeat;
+    quality=d.quality||10;dither=d.dither||false;
+    palette=d.palette||null;bgColor=d.bgColor||null;
+    outputBuffer=[];frame=0;frames=[];
+    // Write GIF header
+    outputBuffer.push(0x47,0x49,0x46,0x38,0x39,0x61);// GIF89a
+    outputBuffer.push(width&255,width>>8,height&255,height>>8);
+    outputBuffer.push(0xf7,0,0);// Global color table
+    // Write placeholder global color table (256 colors)
+    for(var i=0;i<256*3;i++)outputBuffer.push(0);
+    // Write NETSCAPE extension for looping
+    if(repeat>=0){
+      outputBuffer.push(0x21,0xff,0x0b);
+      outputBuffer.push(0x4e,0x45,0x54,0x53,0x43,0x41,0x50,0x45,0x32,0x2e,0x30);
+      outputBuffer.push(0x03,0x01);
+      outputBuffer.push(repeat&255,repeat>>8);
+      outputBuffer.push(0x00);
+    }
+  }else if(d.cmd==='frame'){
+    frames.push(d.data);
+  }else if(d.cmd==='finish'){
+    processFrames();
+  }
+};
+
+function processFrames(){
+  // Build color palette from all frames using median cut
+  var colorCounts={};
+  for(var f=0;f<frames.length;f++){
+    var data=frames[f];
+    for(var i=0;i<data.length;i+=4){
+      if(data[i+3]<128)continue;// Skip transparent
+      var c=(data[i]<<16)|(data[i+1]<<8)|data[i+2];
+      colorCounts[c]=(colorCounts[c]||0)+1;
+    }
+  }
+  
+  // Get top 255 colors (reserve one for transparent)
+  var colors=Object.keys(colorCounts).map(function(c){return parseInt(c)});
+  colors.sort(function(a,b){return colorCounts[b]-colorCounts[a]});
+  colors=colors.slice(0,255);
+  
+  // Build palette lookup
+  var paletteMap={};
+  var paletteData=new Uint8Array(256*3);
+  for(var i=0;i<colors.length;i++){
+    var c=colors[i];
+    paletteMap[c]=i;
+    paletteData[i*3]=(c>>16)&255;
+    paletteData[i*3+1]=(c>>8)&255;
+    paletteData[i*3+2]=c&255;
+  }
+  var transparentIndex=255;
+  
+  // Update global color table in header
+  for(var i=0;i<256*3;i++){
+    outputBuffer[13+i]=paletteData[i];
+  }
+  
+  // Process each frame
+  for(var f=0;f<frames.length;f++){
+    var data=frames[f];
+    var indexedFrame=new Uint8Array(width*height);
+    var hasTransparent=false;
+    
+    for(var i=0;i<width*height;i++){
+      var pi=i*4;
+      if(data[pi+3]<128){
+        indexedFrame[i]=transparentIndex;
+        hasTransparent=true;
+      }else{
+        var c=(data[pi]<<16)|(data[pi+1]<<8)|data[pi+2];
+        indexedFrame[i]=paletteMap[c]!==undefined?paletteMap[c]:findClosestColor(c,colors,paletteMap);
+      }
+    }
+    
+    // Write Graphic Control Extension
+    outputBuffer.push(0x21,0xf9,0x04);
+    outputBuffer.push(hasTransparent?0x09:0x08);// Disposal + transparent flag
+    outputBuffer.push(delay&255,delay>>8);
+    outputBuffer.push(hasTransparent?transparentIndex:0);
+    outputBuffer.push(0x00);
+    
+    // Write Image Descriptor
+    outputBuffer.push(0x2c);
+    outputBuffer.push(0,0,0,0);// Left, Top
+    outputBuffer.push(width&255,width>>8,height&255,height>>8);
+    outputBuffer.push(0x00);// No local color table
+    
+    // LZW encode frame
+    var minCodeSize=8;
+    outputBuffer.push(minCodeSize);
+    
+    var encoded=[];
+    var clearCode=1<<minCodeSize;
+    var endCode=clearCode+1;
+    var codeSize=minCodeSize+1;
+    var nextCode=endCode+1;
+    var codeTable={};
+    var maxCode=4096;
+    
+    encoded.push(clearCode);
+    var current=indexedFrame[0];
+    
+    for(var i=1;i<indexedFrame.length;i++){
+      var next=indexedFrame[i];
+      var key=(current<<8)|next;
+      if(codeTable[key]!==undefined){
+        current=codeTable[key];
+      }else{
+        encoded.push(current);
+        if(nextCode<maxCode){
+          codeTable[key]=nextCode++;
+          if(nextCode>(1<<codeSize)&&codeSize<12){
+            codeSize++;
+          }
+        }else{
+          encoded.push(clearCode);
+          codeTable={};
+          codeSize=minCodeSize+1;
+          nextCode=endCode+1;
+        }
+        current=next;
+      }
+    }
+    encoded.push(current);
+    encoded.push(endCode);
+    
+    // Pack codes into bytes
+    var bits=0,buf=0,pos=0;
+    var subBlock=[];
+    codeSize=minCodeSize+1;
+    nextCode=endCode+1;
+    
+    for(var i=0;i<encoded.length;i++){
+      if(encoded[i]===clearCode&&i>0){
+        codeSize=minCodeSize+1;
+        nextCode=endCode+1;
+      }
+      buf|=encoded[i]<<bits;
+      bits+=codeSize;
+      while(bits>=8){
+        subBlock.push(buf&255);
+        buf>>=8;
+        bits-=8;
+        if(subBlock.length===255){
+          outputBuffer.push(255);
+          for(var j=0;j<255;j++)outputBuffer.push(subBlock[j]);
+          subBlock=[];
+        }
+      }
+      if(encoded[i]!==clearCode&&encoded[i]!==endCode){
+        nextCode++;
+        if(nextCode>(1<<codeSize)&&codeSize<12)codeSize++;
+      }
+    }
+    if(bits>0)subBlock.push(buf&255);
+    if(subBlock.length>0){
+      outputBuffer.push(subBlock.length);
+      for(var j=0;j<subBlock.length;j++)outputBuffer.push(subBlock[j]);
+    }
+    outputBuffer.push(0x00);// Block terminator
+  }
+  
+  // Write GIF trailer
+  outputBuffer.push(0x3b);
+  
+  self.postMessage({done:true,data:new Uint8Array(outputBuffer)});
+}
+
+function findClosestColor(c,colors,paletteMap){
+  var r1=(c>>16)&255,g1=(c>>8)&255,b1=c&255;
+  var best=0,bestDist=Infinity;
+  for(var i=0;i<colors.length;i++){
+    var c2=colors[i];
+    var r2=(c2>>16)&255,g2=(c2>>8)&255,b2=c2&255;
+    var dist=(r1-r2)*(r1-r2)+(g1-g2)*(g1-g2)+(b1-b2)*(b1-b2);
+    if(dist<bestDist){bestDist=dist;best=i;}
+  }
+  paletteMap[c]=best;
+  return best;
+}
+\`;
+
+// Create the GIF encoder
+class GifEncoder {
+  constructor(width, height, options = {}) {
+    this.width = width;
+    this.height = height;
+    this.delay = options.delay || 50;
+    this.repeat = options.repeat !== undefined ? options.repeat : 0;
+    this.quality = options.quality || 10;
+    this.frames = [];
+  }
+  
+  addFrame(imageData) {
+    // imageData should be Uint8ClampedArray of RGBA data
+    this.frames.push(new Uint8Array(imageData));
+  }
+  
+  async finish() {
+    return new Promise((resolve, reject) => {
+      const blob = new Blob([GIF_WORKER_CODE], { type: 'application/javascript' });
+      const workerUrl = URL.createObjectURL(blob);
+      const worker = new Worker(workerUrl);
+      
+      worker.onmessage = (e) => {
+        if (e.data.done) {
+          URL.revokeObjectURL(workerUrl);
+          worker.terminate();
+          resolve(e.data.data);
+        }
+      };
+      
+      worker.onerror = (err) => {
+        URL.revokeObjectURL(workerUrl);
+        worker.terminate();
+        reject(err);
+      };
+      
+      // Initialize
+      worker.postMessage({
+        cmd: 'init',
+        width: this.width,
+        height: this.height,
+        delay: Math.round(this.delay / 10), // GIF delay is in 1/100ths of a second
+        repeat: this.repeat,
+        quality: this.quality
+      });
+      
+      // Send frames
+      for (const frame of this.frames) {
+        worker.postMessage({ cmd: 'frame', data: frame });
+      }
+      
+      // Finish encoding
+      worker.postMessage({ cmd: 'finish' });
+    });
+  }
+}
+
+window.GifEncoder = GifEncoder;
+`;
+/**
+ * Create a GIF from an array of PNG frame data URLs
+ * This function is meant to be called from the Node.js context
+ * and uses the browser to do the actual encoding
+ */
+async function createGifFromFrames(frames, outputPath, options = {
+    width: exports.GIF_CONFIG.width,
+    height: exports.GIF_CONFIG.height,
+    delay: exports.GIF_CONFIG.frameDelay,
+}) {
+    try {
+        // For now, we'll use a simpler approach: write frames and use an external tool
+        // or implement GIF encoding directly in Node.js
+        // Since we need this to work in GitHub Actions without additional tools,
+        // let's implement a basic GIF encoder in Node.js
+        const gifData = await encodeGifNodeJS(frames, options);
+        await fs.writeFile(outputPath, gifData);
+        core.info(`Created GIF at ${outputPath}`);
+        return true;
+    }
+    catch (error) {
+        core.warning(`Failed to create GIF: ${error}`);
+        return false;
+    }
+}
+/**
+ * Simple GIF encoder for Node.js
+ * Encodes PNG frames into an animated GIF
+ */
+async function encodeGifNodeJS(frames, options) {
+    const { width, height, delay } = options;
+    const delayCs = Math.round(delay / 10); // Convert ms to centiseconds
+    // GIF header
+    const header = Buffer.from([
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // GIF89a
+        width & 0xff, (width >> 8) & 0xff,
+        height & 0xff, (height >> 8) & 0xff,
+        0xf7, // Global color table flag, color resolution, sorted, size (256 colors)
+        0x00, // Background color index
+        0x00, // Pixel aspect ratio
+    ]);
+    // Collect all unique colors from all frames
+    const allPixels = [];
+    for (const frame of frames) {
+        const pixels = await decodePngToPixels(frame, width, height);
+        allPixels.push(pixels);
+    }
+    // Build global color palette (256 colors max, reserve one for transparent)
+    const colorCounts = new Map();
+    for (const pixels of allPixels) {
+        for (const pixel of pixels) {
+            if (pixel.a < 128)
+                continue; // Skip transparent
+            const key = (pixel.r << 16) | (pixel.g << 8) | pixel.b;
+            colorCounts.set(key, (colorCounts.get(key) || 0) + 1);
+        }
+    }
+    // Get top 255 colors
+    const sortedColors = [...colorCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 255)
+        .map(([color]) => color);
+    // Build palette lookup
+    const paletteMap = new Map();
+    const paletteData = Buffer.alloc(256 * 3);
+    for (let i = 0; i < sortedColors.length; i++) {
+        const color = sortedColors[i];
+        paletteMap.set(color, i);
+        paletteData[i * 3] = (color >> 16) & 0xff;
+        paletteData[i * 3 + 1] = (color >> 8) & 0xff;
+        paletteData[i * 3 + 2] = color & 0xff;
+    }
+    const transparentIndex = 255;
+    // NETSCAPE extension for looping
+    const netscapeExt = Buffer.from([
+        0x21, 0xff, 0x0b,
+        0x4e, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2e, 0x30, // NETSCAPE2.0
+        0x03, 0x01,
+        0x00, 0x00, // Loop count (0 = infinite)
+        0x00,
+    ]);
+    // Encode each frame
+    const frameBuffers = [];
+    for (const pixels of allPixels) {
+        // Index the frame
+        const indexed = new Uint8Array(width * height);
+        let hasTransparent = false;
+        for (let i = 0; i < pixels.length; i++) {
+            const pixel = pixels[i];
+            if (pixel.a < 128) {
+                indexed[i] = transparentIndex;
+                hasTransparent = true;
+            }
+            else {
+                const key = (pixel.r << 16) | (pixel.g << 8) | pixel.b;
+                indexed[i] = paletteMap.get(key) ?? findClosestColorIndex(pixel, sortedColors);
+            }
+        }
+        // Graphic Control Extension
+        const gce = Buffer.from([
+            0x21, 0xf9, 0x04,
+            hasTransparent ? 0x09 : 0x08, // Disposal method + transparent flag
+            delayCs & 0xff, (delayCs >> 8) & 0xff,
+            hasTransparent ? transparentIndex : 0,
+            0x00,
+        ]);
+        // Image Descriptor
+        const imageDesc = Buffer.from([
+            0x2c,
+            0x00, 0x00, 0x00, 0x00, // Left, Top
+            width & 0xff, (width >> 8) & 0xff,
+            height & 0xff, (height >> 8) & 0xff,
+            0x00, // No local color table
+        ]);
+        // LZW encode the indexed data
+        const lzwData = lzwEncode(indexed, 8);
+        frameBuffers.push(Buffer.concat([gce, imageDesc, lzwData]));
+    }
+    // GIF trailer
+    const trailer = Buffer.from([0x3b]);
+    return Buffer.concat([header, paletteData, netscapeExt, ...frameBuffers, trailer]);
+}
+/**
+ * Find the closest color in the palette
+ */
+function findClosestColorIndex(pixel, palette) {
+    let bestIndex = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < palette.length; i++) {
+        const color = palette[i];
+        const r2 = (color >> 16) & 0xff;
+        const g2 = (color >> 8) & 0xff;
+        const b2 = color & 0xff;
+        const dist = (pixel.r - r2) ** 2 + (pixel.g - g2) ** 2 + (pixel.b - b2) ** 2;
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+        }
+    }
+    return bestIndex;
+}
+/**
+ * LZW encode data for GIF
+ */
+function lzwEncode(data, minCodeSize) {
+    const clearCode = 1 << minCodeSize;
+    const endCode = clearCode + 1;
+    const output = [minCodeSize];
+    const codes = [];
+    let codeSize = minCodeSize + 1;
+    let nextCode = endCode + 1;
+    const maxCode = 4096;
+    const codeTable = new Map();
+    // Initialize code table with single-character codes
+    for (let i = 0; i < clearCode; i++) {
+        codeTable.set(String(i), i);
+    }
+    codes.push(clearCode);
+    let current = String(data[0]);
+    for (let i = 1; i < data.length; i++) {
+        const next = String(data[i]);
+        const combined = current + ',' + next;
+        if (codeTable.has(combined)) {
+            current = combined;
+        }
+        else {
+            codes.push(codeTable.get(current));
+            if (nextCode < maxCode) {
+                codeTable.set(combined, nextCode++);
+                if (nextCode > 1 << codeSize && codeSize < 12) {
+                    codeSize++;
+                }
+            }
+            else {
+                // Reset code table
+                codes.push(clearCode);
+                codeTable.clear();
+                for (let j = 0; j < clearCode; j++) {
+                    codeTable.set(String(j), j);
+                }
+                codeSize = minCodeSize + 1;
+                nextCode = endCode + 1;
+            }
+            current = next;
+        }
+    }
+    codes.push(codeTable.get(current));
+    codes.push(endCode);
+    // Pack codes into bytes
+    let bits = 0;
+    let buf = 0;
+    const subBlocks = [];
+    let currentBlock = [];
+    codeSize = minCodeSize + 1;
+    nextCode = endCode + 1;
+    for (let i = 0; i < codes.length; i++) {
+        const code = codes[i];
+        if (code === clearCode && i > 0) {
+            codeSize = minCodeSize + 1;
+            nextCode = endCode + 1;
+        }
+        buf |= code << bits;
+        bits += codeSize;
+        while (bits >= 8) {
+            currentBlock.push(buf & 0xff);
+            buf >>= 8;
+            bits -= 8;
+            if (currentBlock.length === 255) {
+                subBlocks.push(255, ...currentBlock);
+                currentBlock = [];
+            }
+        }
+        if (code !== clearCode && code !== endCode) {
+            nextCode++;
+            if (nextCode > 1 << codeSize && codeSize < 12) {
+                codeSize++;
+            }
+        }
+    }
+    if (bits > 0) {
+        currentBlock.push(buf & 0xff);
+    }
+    if (currentBlock.length > 0) {
+        subBlocks.push(currentBlock.length, ...currentBlock);
+    }
+    subBlocks.push(0); // Block terminator
+    output.push(...subBlocks);
+    return Buffer.from(output);
+}
+/**
+ * Decode a PNG buffer to raw pixel data
+ * Simple PNG decoder for RGBA data
+ */
+async function decodePngToPixels(pngBuffer, expectedWidth, expectedHeight) {
+    // Check PNG signature
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    for (let i = 0; i < 8; i++) {
+        if (pngBuffer[i] !== signature[i]) {
+            throw new Error('Invalid PNG signature');
+        }
+    }
+    let offset = 8;
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    const idatChunks = [];
+    // Parse chunks
+    while (offset < pngBuffer.length) {
+        const length = pngBuffer.readUInt32BE(offset);
+        const type = pngBuffer.slice(offset + 4, offset + 8).toString('ascii');
+        const data = pngBuffer.slice(offset + 8, offset + 8 + length);
+        if (type === 'IHDR') {
+            width = data.readUInt32BE(0);
+            height = data.readUInt32BE(4);
+            bitDepth = data[8];
+            colorType = data[9];
+        }
+        else if (type === 'IDAT') {
+            idatChunks.push(data);
+        }
+        else if (type === 'IEND') {
+            break;
+        }
+        offset += 12 + length; // length + type + data + crc
+    }
+    // Decompress IDAT data
+    const compressedData = Buffer.concat(idatChunks);
+    const { inflateSync } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(43106)));
+    const decompressed = inflateSync(compressedData);
+    // Parse scanlines
+    const pixels = [];
+    const bytesPerPixel = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
+    const scanlineLength = width * bytesPerPixel + 1; // +1 for filter byte
+    for (let y = 0; y < height; y++) {
+        const scanlineStart = y * scanlineLength;
+        const filterType = decompressed[scanlineStart];
+        const scanline = decompressed.slice(scanlineStart + 1, scanlineStart + scanlineLength);
+        // Apply filter (simplified - only supporting None filter for now)
+        // In a full implementation, we'd handle Sub, Up, Average, Paeth filters
+        for (let x = 0; x < width; x++) {
+            const pixelOffset = x * bytesPerPixel;
+            if (colorType === 6) {
+                // RGBA
+                pixels.push({
+                    r: scanline[pixelOffset],
+                    g: scanline[pixelOffset + 1],
+                    b: scanline[pixelOffset + 2],
+                    a: scanline[pixelOffset + 3],
+                });
+            }
+            else if (colorType === 2) {
+                // RGB
+                pixels.push({
+                    r: scanline[pixelOffset],
+                    g: scanline[pixelOffset + 1],
+                    b: scanline[pixelOffset + 2],
+                    a: 255,
+                });
+            }
+            else {
+                // Grayscale or other
+                const gray = scanline[pixelOffset];
+                pixels.push({ r: gray, g: gray, b: gray, a: 255 });
+            }
+        }
+    }
+    return pixels;
 }
 
 
@@ -74370,6 +75351,8 @@ const image_hosting_1 = __nccwpck_require__(4705);
 const comment_1 = __nccwpck_require__(62246);
 const git_1 = __nccwpck_require__(71243);
 const threejs_renderer_1 = __nccwpck_require__(65802);
+const animation_parser_1 = __nccwpck_require__(69609);
+const gif_encoder_1 = __nccwpck_require__(67248);
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
     return await Promise.resolve().then(() => __importStar(__nccwpck_require__(15101)));
@@ -74541,6 +75524,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         // List files in temp dir for debugging
         const listAfter = await fs.readdir(tempDir);
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
+        // Render animation GIFs for changed animations
+        const animationUrls = await renderChangedAnimations(prEntities, resourcePackPath, tempDir, browser);
         const publicUrls = await (0, image_hosting_1.uploadImages)(tempDir, github.context.issue.number);
         core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
         // Track which entities are new (not present on base branch)
@@ -74578,13 +75563,159 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         });
         // Filter out rows where both normal images are missing
         const nonEmptyRows = structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
-        await (0, comment_1.postComment)(nonEmptyRows);
+        // Build animation URL sets from rendered GIFs
+        const animationUrlSets = animationUrls.map((anim) => {
+            const gifPath = path.join(tempDir, anim.gifFilename);
+            const gifUrl = publicUrls[gifPath] || '';
+            return {
+                entityIdentifier: anim.entityIdentifier,
+                animationIdentifier: anim.animationIdentifier,
+                gifUrl,
+                isNew: anim.isNew,
+            };
+        }).filter((a) => a.gifUrl.length > 0);
+        await (0, comment_1.postComment)(nonEmptyRows, animationUrlSets);
         core.info('Rendering process complete.');
     }
     finally {
         // Close the browser
         await browser.close();
     }
+}
+/**
+ * Render GIFs for changed animations
+ */
+async function renderChangedAnimations(entities, resourcePackPath, tempDir, browser) {
+    const renderedAnimations = [];
+    // Build a map of animation identifier to entity and animation data
+    const animationMap = new Map();
+    for (const entity of entities) {
+        for (const animFile of entity.animationFiles) {
+            try {
+                const animPath = path.join(resourcePackPath, animFile);
+                const content = await fs.readFile(animPath, 'utf-8');
+                const animFileData = JSON.parse(content);
+                if (animFileData.animations) {
+                    for (const [animId, animData] of Object.entries(animFileData.animations)) {
+                        animationMap.set(animId, {
+                            entity,
+                            animationFile: animFile,
+                            animationData: animData,
+                        });
+                    }
+                }
+            }
+            catch (error) {
+                core.warning(`Failed to parse animation file ${animFile}: ${error}`);
+            }
+        }
+    }
+    // For now, render idle animations for entities with animation changes
+    // In a full implementation, we'd use findChangedAnimations to determine which specific animations changed
+    const processedEntities = new Set();
+    for (const entity of entities) {
+        if (processedEntities.has(entity.identifier))
+            continue;
+        if (entity.animationFiles.length === 0)
+            continue;
+        // Find an idle animation for this entity
+        const idleAnimId = findIdleAnimation(entity.identifier, animationMap);
+        if (!idleAnimId)
+            continue;
+        const animInfo = animationMap.get(idleAnimId);
+        if (!animInfo)
+            continue;
+        core.info(`Rendering animation ${idleAnimId} for ${entity.identifier}`);
+        try {
+            const result = await renderAnimationGif(entity, idleAnimId, animInfo.animationData, resourcePackPath, tempDir, browser);
+            if (result) {
+                renderedAnimations.push(result);
+                processedEntities.add(entity.identifier);
+            }
+        }
+        catch (error) {
+            core.warning(`Failed to render animation ${idleAnimId}: ${error}`);
+        }
+    }
+    return renderedAnimations;
+}
+/**
+ * Find an idle animation for an entity
+ */
+function findIdleAnimation(entityIdentifier, animationMap) {
+    // Extract the entity name from the identifier (e.g., "pokemon:ferroseed" -> "ferroseed")
+    const entityName = entityIdentifier.split(':').pop() || entityIdentifier;
+    // Priority order for idle animations
+    const idlePatterns = [
+        `animation.${entityName}.ground_idle`,
+        `animation.${entityName}.idle`,
+        `animation.${entityName}.water_idle`,
+    ];
+    for (const pattern of idlePatterns) {
+        if (animationMap.has(pattern)) {
+            return pattern;
+        }
+    }
+    // Fall back to any animation containing "idle" for this entity
+    for (const [animId, info] of animationMap) {
+        if (info.entity.identifier === entityIdentifier && animId.includes('idle')) {
+            return animId;
+        }
+    }
+    return null;
+}
+/**
+ * Render a single animation as a GIF
+ */
+async function renderAnimationGif(entity, animationId, animationData, resourcePackPath, tempDir, browser) {
+    if (entity.geometryFiles.length === 0) {
+        core.warning(`No geometry files for ${entity.identifier}`);
+        return null;
+    }
+    const geometryPath = path.join(resourcePackPath, entity.geometryFiles[0]);
+    // Find the best texture
+    let texturePath = null;
+    const textureKeys = Object.keys(entity.textureMap);
+    const preferredKey = textureKeys.find((k) => k === 'default') ||
+        textureKeys.find((k) => k === 'male_default') ||
+        textureKeys.find((k) => !k.startsWith('shiny_') && k !== 'evo_aura');
+    if (preferredKey && entity.textureMap[preferredKey]) {
+        let txPath = entity.textureMap[preferredKey];
+        if (!txPath.endsWith('.png') && !txPath.endsWith('.jpg')) {
+            txPath = txPath + '.png';
+        }
+        texturePath = path.join(resourcePackPath, txPath);
+    }
+    // Calculate frame timestamps
+    const duration = (0, animation_parser_1.getAnimationDuration)(animationData);
+    const frameTimestamps = (0, gif_encoder_1.calculateFrameTimestamps)(duration);
+    core.info(`Rendering ${frameTimestamps.length} frames for ${animationId} (duration: ${duration}s)`);
+    // Render frames
+    const frames = await (0, threejs_renderer_1.renderAnimationFrames)(geometryPath, texturePath, animationData, frameTimestamps, browser, { width: gif_encoder_1.GIF_CONFIG.width, height: gif_encoder_1.GIF_CONFIG.height });
+    if (frames.length === 0) {
+        core.warning(`No frames rendered for ${animationId}`);
+        return null;
+    }
+    // Create GIF
+    const safeAnimId = animationId.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const gifFilename = `${safeAnimId}.gif`;
+    const gifPath = path.join(tempDir, gifFilename);
+    const success = await (0, gif_encoder_1.createGifFromFrames)(frames, gifPath, {
+        width: gif_encoder_1.GIF_CONFIG.width,
+        height: gif_encoder_1.GIF_CONFIG.height,
+        delay: gif_encoder_1.GIF_CONFIG.frameDelay,
+    });
+    if (!success) {
+        core.warning(`Failed to create GIF for ${animationId}`);
+        return null;
+    }
+    core.info(`Created animation GIF: ${gifPath}`);
+    return {
+        entityIdentifier: entity.identifier,
+        animationIdentifier: animationId,
+        gifFilename,
+        isNew: false, // TODO: Determine if this is a new animation
+    };
 }
 
 
@@ -74636,6 +75767,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.renderModelWithThreeJS = renderModelWithThreeJS;
 exports.renderBBModelWithThreeJS = renderBBModelWithThreeJS;
 exports.renderGeometryWithThreeJS = renderGeometryWithThreeJS;
+exports.renderAnimationFrames = renderAnimationFrames;
+exports.loadTextureAsDataURL = loadTextureAsDataURL;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(91943));
 const path = __importStar(__nccwpck_require__(16928));
@@ -75139,6 +76272,455 @@ async function renderGeometryWithThreeJS(geometry, texturePath, outputPath, brow
     catch (e) {
         core.warning(`Three.js render error: ${e}`);
         return false;
+    }
+    finally {
+        if (page) {
+            await page.close().catch(() => { });
+        }
+    }
+}
+// Animation rendering script that supports bone transforms
+const THREEJS_ANIMATION_SCRIPT = `
+// Store references for animation
+let modelBoneGroups = new Map();
+let modelBoneData = new Map();
+let currentScene = null;
+let currentCamera = null;
+let currentRenderer = null;
+let modelCenter = null;
+
+// Create a textured cube mesh from Bedrock cube data
+function createTexturedCubeForAnim(cube, bonePivot, textureWidth, textureHeight, texture, fallbackColor) {
+  const origin = cube.origin || [0, 0, 0];
+  const size = cube.size || [1, 1, 1];
+  const inflate = cube.inflate || 0;
+  
+  const w = Math.abs(size[0]) + inflate * 2;
+  const h = Math.abs(size[1]) + inflate * 2;
+  const d = Math.abs(size[2]) + inflate * 2;
+  
+  const uv = cube.uv;
+  const isPerFaceUV = uv && typeof uv === 'object' && !Array.isArray(uv);
+  const isBoxUV = uv && Array.isArray(uv);
+  
+  let material;
+  
+  if (texture && (isPerFaceUV || isBoxUV)) {
+    const materials = [];
+    
+    if (isPerFaceUV) {
+      const faces = ['east', 'west', 'up', 'down', 'south', 'north'];
+      
+      for (let i = 0; i < 6; i++) {
+        const faceName = faces[i];
+        const faceUV = uv[faceName];
+        
+        if (faceUV && faceUV.uv && faceUV.uv_size) {
+          const faceTexture = texture.clone();
+          faceTexture.needsUpdate = true;
+          faceTexture.magFilter = THREE.NearestFilter;
+          faceTexture.minFilter = THREE.NearestFilter;
+          
+          let uvX = faceUV.uv[0];
+          let uvY = faceUV.uv[1];
+          let uvW = faceUV.uv_size[0];
+          let uvH = faceUV.uv_size[1];
+          
+          if (uvW < 0) { uvX = uvX + uvW; uvW = Math.abs(uvW); }
+          if (uvH < 0) { uvY = uvY + uvH; uvH = Math.abs(uvH); }
+          
+          const offsetU = uvX / textureWidth;
+          const offsetV = 1 - (uvY + uvH) / textureHeight;
+          const repeatU = uvW / textureWidth;
+          const repeatV = uvH / textureHeight;
+          
+          faceTexture.offset.set(offsetU, offsetV);
+          faceTexture.repeat.set(repeatU, repeatV);
+          
+          materials.push(new THREE.MeshStandardMaterial({
+            map: faceTexture,
+            transparent: true,
+            alphaTest: 0.1,
+            side: THREE.DoubleSide,
+          }));
+        } else {
+          materials.push(new THREE.MeshStandardMaterial({ color: fallbackColor, transparent: true }));
+        }
+      }
+      material = materials;
+    } else if (isBoxUV) {
+      material = new THREE.MeshStandardMaterial({
+        map: texture,
+        transparent: true,
+        alphaTest: 0.1,
+        side: THREE.DoubleSide,
+      });
+    }
+  } else {
+    material = new THREE.MeshStandardMaterial({
+      color: fallbackColor,
+      roughness: 0.8,
+      metalness: 0.1,
+    });
+  }
+  
+  const geometry = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geometry, material);
+  
+  mesh.position.set(
+    origin[0] + size[0] / 2 - bonePivot[0],
+    origin[1] + size[1] / 2 - bonePivot[1],
+    origin[2] + size[2] / 2 - bonePivot[2]
+  );
+  
+  if (cube.rotation && cube.pivot) {
+    const cubePivot = cube.pivot;
+    const rotGroup = new THREE.Group();
+    rotGroup.position.set(
+      cubePivot[0] - bonePivot[0],
+      cubePivot[1] - bonePivot[1],
+      cubePivot[2] - bonePivot[2]
+    );
+    mesh.position.set(
+      origin[0] + size[0] / 2 - cubePivot[0],
+      origin[1] + size[1] / 2 - cubePivot[1],
+      origin[2] + size[2] / 2 - cubePivot[2]
+    );
+    rotGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(cube.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(cube.rotation[1] || 0)),
+      THREE.MathUtils.degToRad(cube.rotation[2] || 0)
+    );
+    rotGroup.add(mesh);
+    return rotGroup;
+  }
+  
+  return mesh;
+}
+
+// Create a bone group for animation
+function createBoneForAnim(bone, textureWidth, textureHeight, texture, colorIndex) {
+  const group = new THREE.Group();
+  group.name = bone.name;
+  
+  // Store original transforms for reset
+  group.userData.originalRotation = bone.rotation ? [...bone.rotation] : [0, 0, 0];
+  group.userData.originalPosition = bone.pivot ? [...bone.pivot] : [0, 0, 0];
+  group.userData.originalScale = [1, 1, 1];
+  
+  const colors = [0x4a90d9, 0x7cb342, 0xffa726, 0xab47bc, 0x26a69a, 0xef5350, 0x5c6bc0, 0x66bb6a];
+  const boneColor = colors[colorIndex % colors.length];
+  const bonePivot = bone.pivot || [0, 0, 0];
+  
+  if (bone.cubes) {
+    for (const cube of bone.cubes) {
+      const cubeMesh = createTexturedCubeForAnim(cube, bonePivot, textureWidth, textureHeight, texture, boneColor);
+      group.add(cubeMesh);
+    }
+  }
+  
+  group.position.set(bonePivot[0], bonePivot[1], bonePivot[2]);
+  
+  if (bone.rotation) {
+    group.rotation.set(
+      THREE.MathUtils.degToRad(-(bone.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(bone.rotation[1] || 0)),
+      THREE.MathUtils.degToRad(bone.rotation[2] || 0)
+    );
+  }
+  
+  return group;
+}
+
+// Initialize the animation renderer with a model
+async function initAnimationRenderer(geometry, textureDataUrl, canvasWidth, canvasHeight) {
+  const description = geometry.description || {};
+  const textureWidth = description.texture_width || 64;
+  const textureHeight = description.texture_height || 64;
+  const bones = geometry.bones || [];
+  
+  // Create scene
+  currentScene = new THREE.Scene();
+  currentScene.background = new THREE.Color(0x2d2d2d);
+  
+  // Create camera
+  currentCamera = new THREE.PerspectiveCamera(45, canvasWidth / canvasHeight, 0.1, 1000);
+  
+  // Create renderer
+  const canvas = document.getElementById('renderCanvas');
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+  currentRenderer = new THREE.WebGLRenderer({ 
+    canvas: canvas,
+    antialias: true,
+    preserveDrawingBuffer: true 
+  });
+  currentRenderer.setSize(canvasWidth, canvasHeight);
+  currentRenderer.setPixelRatio(1);
+  
+  // Add lights
+  currentScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+  const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight1.position.set(50, 100, 50);
+  currentScene.add(dirLight1);
+  const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
+  dirLight2.position.set(-50, 50, -50);
+  currentScene.add(dirLight2);
+  
+  // Load texture
+  let texture = null;
+  if (textureDataUrl) {
+    const textureLoader = new THREE.TextureLoader();
+    texture = await new Promise((resolve) => {
+      textureLoader.load(
+        textureDataUrl,
+        (tex) => {
+          tex.magFilter = THREE.NearestFilter;
+          tex.minFilter = THREE.NearestFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          resolve(tex);
+        },
+        undefined,
+        () => resolve(null)
+      );
+    });
+  }
+  
+  // Create model
+  const modelGroup = new THREE.Group();
+  modelBoneGroups = new Map();
+  modelBoneData = new Map();
+  
+  bones.forEach((bone) => modelBoneData.set(bone.name, bone));
+  
+  bones.forEach((bone, index) => {
+    const boneGroup = createBoneForAnim(bone, textureWidth, textureHeight, texture, index);
+    modelBoneGroups.set(bone.name, boneGroup);
+  });
+  
+  bones.forEach((bone) => {
+    const boneGroup = modelBoneGroups.get(bone.name);
+    if (bone.parent && modelBoneGroups.has(bone.parent)) {
+      const parentGroup = modelBoneGroups.get(bone.parent);
+      const parentBone = modelBoneData.get(bone.parent);
+      if (parentBone && parentBone.pivot) {
+        const childPivot = bone.pivot || [0, 0, 0];
+        boneGroup.position.set(
+          childPivot[0] - parentBone.pivot[0],
+          childPivot[1] - parentBone.pivot[1],
+          childPivot[2] - parentBone.pivot[2]
+        );
+      }
+      parentGroup.add(boneGroup);
+    } else {
+      modelGroup.add(boneGroup);
+    }
+  });
+  
+  currentScene.add(modelGroup);
+  
+  // Position camera
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  modelCenter = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const distance = maxDim * 2.5;
+  
+  currentCamera.position.set(
+    modelCenter.x - distance * 0.7,
+    modelCenter.y + distance * 0.5,
+    modelCenter.z - distance * 0.7
+  );
+  currentCamera.lookAt(modelCenter);
+  
+  return { success: true };
+}
+
+// Apply bone transforms from animation evaluation
+function applyBoneTransforms(boneTransforms) {
+  for (const [boneName, transform] of Object.entries(boneTransforms)) {
+    const boneGroup = modelBoneGroups.get(boneName);
+    if (!boneGroup) continue;
+    
+    const originalBone = modelBoneData.get(boneName);
+    const originalRotation = boneGroup.userData.originalRotation;
+    const originalPosition = boneGroup.userData.originalPosition;
+    
+    // Apply rotation (add to base rotation)
+    const rot = transform.rotation || [0, 0, 0];
+    boneGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(originalRotation[0] + rot[0])),
+      THREE.MathUtils.degToRad(-(originalRotation[1] + rot[1])),
+      THREE.MathUtils.degToRad(originalRotation[2] + rot[2])
+    );
+    
+    // Apply position offset
+    const pos = transform.position || [0, 0, 0];
+    
+    // Check if this bone has a parent
+    if (originalBone && originalBone.parent && modelBoneData.has(originalBone.parent)) {
+      const parentBone = modelBoneData.get(originalBone.parent);
+      if (parentBone && parentBone.pivot) {
+        boneGroup.position.set(
+          originalPosition[0] - parentBone.pivot[0] + pos[0],
+          originalPosition[1] - parentBone.pivot[1] + pos[1],
+          originalPosition[2] - parentBone.pivot[2] + pos[2]
+        );
+      } else {
+        boneGroup.position.set(
+          originalPosition[0] + pos[0],
+          originalPosition[1] + pos[1],
+          originalPosition[2] + pos[2]
+        );
+      }
+    } else {
+      boneGroup.position.set(
+        originalPosition[0] + pos[0],
+        originalPosition[1] + pos[1],
+        originalPosition[2] + pos[2]
+      );
+    }
+    
+    // Apply scale
+    const scale = transform.scale || [1, 1, 1];
+    boneGroup.scale.set(scale[0], scale[1], scale[2]);
+  }
+}
+
+// Reset all bone transforms to original
+function resetBoneTransforms() {
+  for (const [boneName, boneGroup] of modelBoneGroups) {
+    const originalBone = modelBoneData.get(boneName);
+    const originalRotation = boneGroup.userData.originalRotation;
+    const originalPosition = boneGroup.userData.originalPosition;
+    
+    boneGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(originalRotation[0])),
+      THREE.MathUtils.degToRad(-(originalRotation[1])),
+      THREE.MathUtils.degToRad(originalRotation[2])
+    );
+    
+    if (originalBone && originalBone.parent && modelBoneData.has(originalBone.parent)) {
+      const parentBone = modelBoneData.get(originalBone.parent);
+      if (parentBone && parentBone.pivot) {
+        boneGroup.position.set(
+          originalPosition[0] - parentBone.pivot[0],
+          originalPosition[1] - parentBone.pivot[1],
+          originalPosition[2] - parentBone.pivot[2]
+        );
+      } else {
+        boneGroup.position.set(originalPosition[0], originalPosition[1], originalPosition[2]);
+      }
+    } else {
+      boneGroup.position.set(originalPosition[0], originalPosition[1], originalPosition[2]);
+    }
+    
+    boneGroup.scale.set(1, 1, 1);
+  }
+}
+
+// Render a single frame and return as data URL
+function renderFrame() {
+  currentRenderer.render(currentScene, currentCamera);
+  return document.getElementById('renderCanvas').toDataURL('image/png');
+}
+
+// Render a frame with specific bone transforms
+function renderAnimationFrame(boneTransforms) {
+  applyBoneTransforms(boneTransforms);
+  return renderFrame();
+}
+`;
+/**
+ * HTML template for the animation renderer page
+ */
+function getAnimationRendererHTML(canvasWidth, canvasHeight) {
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { margin: 0; background: #2d2d2d; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas" width="${canvasWidth}" height="${canvasHeight}"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    ${THREEJS_ANIMATION_SCRIPT}
+    
+    window.initAnimationRenderer = initAnimationRenderer;
+    window.renderAnimationFrame = renderAnimationFrame;
+    window.resetBoneTransforms = resetBoneTransforms;
+    window.renderFrame = renderFrame;
+    window.animRendererReady = true;
+  </script>
+</body>
+</html>`;
+}
+/**
+ * Render animation frames for a model
+ * Returns an array of PNG buffers, one per frame
+ */
+async function renderAnimationFrames(geometryPath, texturePath, animationData, frameTimestamps, browser, options = {}) {
+    const { width = 400, height = 300 } = options;
+    let page = null;
+    const frames = [];
+    try {
+        // Read the geometry file
+        const geoContent = await fs.readFile(geometryPath, 'utf-8');
+        const geoJson = JSON.parse(geoContent);
+        const geometries = geoJson['minecraft:geometry'];
+        if (!geometries || geometries.length === 0) {
+            core.warning(`No geometry found in ${geometryPath}`);
+            return [];
+        }
+        const geometry = geometries[0];
+        // Load texture
+        const textureDataUrl = texturePath ? await loadTextureAsDataURL(texturePath) : null;
+        // Create page
+        page = await browser.newPage();
+        await page.setViewport({ width, height });
+        // Load the animation renderer HTML
+        await page.setContent(getAnimationRendererHTML(width, height), { waitUntil: 'networkidle0' });
+        // Wait for renderer to be ready
+        await page.waitForFunction(() => window.animRendererReady === true, { timeout: 30000 });
+        core.info('Animation renderer ready');
+        // Initialize the renderer with the model
+        const initResult = await page.evaluate(async (geoJson, textureUrl, w, h) => {
+            const geometry = JSON.parse(geoJson);
+            return await window.initAnimationRenderer(geometry, textureUrl, w, h);
+        }, JSON.stringify(geometry), textureDataUrl, width, height);
+        if (!initResult.success) {
+            core.warning('Failed to initialize animation renderer');
+            return [];
+        }
+        // Import animation parser
+        const { evaluateAnimation } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(69609)));
+        // Render each frame
+        for (let i = 0; i < frameTimestamps.length; i++) {
+            const time = frameTimestamps[i];
+            const evaluation = evaluateAnimation(animationData, time);
+            // Render the frame with bone transforms
+            const dataUrl = await page.evaluate((transforms) => {
+                const boneTransforms = JSON.parse(transforms);
+                return window.renderAnimationFrame(boneTransforms);
+            }, JSON.stringify(evaluation.bones));
+            if (dataUrl) {
+                const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+                frames.push(Buffer.from(base64Data, 'base64'));
+            }
+            if ((i + 1) % 10 === 0) {
+                core.info(`Rendered frame ${i + 1}/${frameTimestamps.length}`);
+            }
+        }
+        core.info(`Rendered ${frames.length} animation frames`);
+        return frames;
+    }
+    catch (e) {
+        core.warning(`Animation render error: ${e}`);
+        return [];
     }
     finally {
         if (page) {
