@@ -1,0 +1,96 @@
+# Pre-Publish Checks Rule
+
+## Overview
+
+Before publishing any changes to GitHub or creating a release, always run local checks to ensure code quality and build integrity.
+
+## Required Checks Before Publishing
+
+### 1. Build the Project
+
+Always run the build to ensure the code compiles and the dist bundle is generated:
+
+```bash
+npm run build
+```
+
+This uses `ncc` to bundle the TypeScript source into `dist/index.js` which is what GitHub Actions uses.
+
+### 2. TypeScript Type Checking
+
+Run TypeScript compiler in check mode to catch type errors:
+
+```bash
+npx tsc --noEmit
+```
+
+### 3. Run Tests (if available)
+
+If tests exist, run them:
+
+```bash
+npm test
+```
+
+Note: Currently no tests are defined. Use `--passWithNoTests` if needed.
+
+### 4. Verify Git Status
+
+Check that all necessary files are staged:
+
+```bash
+git status
+```
+
+Ensure `dist/index.js` is included in commits since GitHub Actions loads from dist.
+
+## Publishing Workflow
+
+### Step 1: Run All Checks
+
+```bash
+npm run build && npx tsc --noEmit
+```
+
+### Step 2: Stage and Commit Changes
+
+```bash
+git add .
+git commit -m "Description of changes"
+```
+
+### Step 3: Push to GitHub
+
+```bash
+git push origin main
+```
+
+### Step 4: Create Release (if needed)
+
+Use GitHub CLI to create a release:
+
+```bash
+gh release create vX.Y.Z --title "Release vX.Y.Z" --notes "Release notes here" --latest
+```
+
+Or use `@latest` tag for the action to always pull the latest release.
+
+## Important Notes
+
+- **Always rebuild dist**: The `dist/index.js` file must be rebuilt after any source changes
+- **Include dist in commits**: GitHub Actions loads from the dist folder, not src
+- **Tag releases properly**: Use semantic versioning (vX.Y.Z)
+- **Mark as latest**: Use `--latest` flag when creating releases for production use
+
+## Quick Reference
+
+```bash
+# Full pre-publish check sequence
+npm run build && npx tsc --noEmit && git status
+
+# Commit with dist
+git add src/ dist/ && git commit -m "message"
+
+# Create latest release
+gh release create vX.Y.Z --latest --generate-notes
+```

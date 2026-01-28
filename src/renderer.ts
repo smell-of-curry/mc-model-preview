@@ -95,7 +95,8 @@ async function renderModelWithBlockbenchWeb(
         const win = window as any;
         return typeof win.Blockbench !== 'undefined' && 
                typeof win.Codecs !== 'undefined' &&
-               typeof win.Formats !== 'undefined';
+               typeof win.Formats !== 'undefined' &&
+               typeof win.newProject !== 'undefined';
       },
       { timeout: 30000 }
     );
@@ -128,10 +129,29 @@ async function renderModelWithBlockbenchWeb(
           }]
         };
         
-        // Override settings.new_tab to prevent "Cannot read properties of undefined" error
-        // The web version tries to read settings.new_tab.value but it's undefined by default
-        if (win.settings) {
-          win.settings.new_tab = { value: false };
+        // Override settings to prevent "Cannot read properties of undefined" errors
+        // The web version doesn't fully initialize settings like the desktop version
+        // We must ensure settings and required sub-properties exist before calling load
+        if (!win.settings) {
+          win.settings = {};
+        }
+        // Mock common settings that Blockbench code may access
+        const settingsDefaults = {
+          new_tab: { value: false },
+          default_path: { value: '' },
+          animation_snap: { value: 24 },
+          preview_checkerboard: { value: true },
+        };
+        for (const [key, defaultValue] of Object.entries(settingsDefaults)) {
+          if (!win.settings[key]) {
+            win.settings[key] = defaultValue;
+          }
+        }
+        
+        // Use newProject() to properly initialize a bedrock project first
+        // This ensures all project state is set up correctly
+        if (win.newProject && win.Formats?.bedrock) {
+          win.newProject(win.Formats.bedrock);
         }
         
         // Use Codecs.bedrock.load() which handles project creation automatically
