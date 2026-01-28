@@ -32963,10 +32963,8 @@ async function run() {
         // Filter base entities to only include those affected in the PR
         const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
         const affectedBaseEntities = baseEntities.filter((e) => affectedEntityIds.includes(e.identifier));
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath);
-        // 3. Checkout back to head
-        core.info(`Checking out head branch: ${headRef}`);
-        await (0, git_1.checkout)(headRef);
+        // Render changes - pass branch refs so renderer can checkout as needed
+        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef, headRef);
         core.info('Action completed successfully.');
     }
     catch (error) {
@@ -33257,6 +33255,7 @@ const github = __importStar(__nccwpck_require__(3228));
 const blockbench_1 = __nccwpck_require__(9402);
 const image_hosting_1 = __nccwpck_require__(4705);
 const comment_1 = __nccwpck_require__(2246);
+const git_1 = __nccwpck_require__(1243);
 const BB_VERSION = '4.11.0';
 const BB_APP_IMAGE = `Blockbench_${BB_VERSION}.AppImage`;
 const BB_EXTRACTED_DIR = 'Blockbench_extracted';
@@ -33265,7 +33264,7 @@ async function setupBlockbench() {
     const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
     await exec.exec('bash', [scriptPath]);
 }
-async function renderChanges(baseEntities, prEntities, resourcePackPath) {
+async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headRef) {
     const toSafeFilename = (name) => {
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
@@ -33292,19 +33291,9 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
         bbExecutable = appImagePath;
         core.info(`Using AppImage at ${appImagePath}`);
     }
-    // Generate "after" models
-    for (const entity of prEntities) {
-        try {
-            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
-            const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
-            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-            core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
-        }
-        catch (error) {
-            core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
-        }
-    }
-    // Generate "before" models
+    // Generate "before" models (checkout base branch first)
+    core.info(`Checking out base branch (${baseRef}) to generate base models...`);
+    await (0, git_1.checkout)(baseRef);
     for (const entity of baseEntities) {
         try {
             const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
@@ -33314,6 +33303,20 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath) {
         }
         catch (error) {
             core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
+        }
+    }
+    // Generate "after" models (checkout head branch)
+    core.info(`Checking out head branch (${headRef}) to generate head models...`);
+    await (0, git_1.checkout)(headRef);
+    for (const entity of prEntities) {
+        try {
+            const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath);
+            const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
+            await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+            core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+        }
+        catch (error) {
+            core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
         }
     }
     // Render the models

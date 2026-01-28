@@ -8,6 +8,7 @@ import { Entity } from './types';
 import { createBBFile } from './blockbench';
 import { uploadImages } from './image-hosting';
 import { postComment } from './comment';
+import { checkout } from './git';
 
 const BB_VERSION = '4.11.0';
 const BB_APP_IMAGE = `Blockbench_${BB_VERSION}.AppImage`;
@@ -22,7 +23,9 @@ async function setupBlockbench(): Promise<void> {
 export async function renderChanges(
   baseEntities: Entity[],
   prEntities: Entity[],
-  resourcePackPath: string
+  resourcePackPath: string,
+  baseRef: string,
+  headRef: string
 ): Promise<void> {
   const toSafeFilename = (name: string): string => {
     return name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -49,21 +52,9 @@ export async function renderChanges(
     core.info(`Using AppImage at ${appImagePath}`);
   }
 
-  // Generate "after" models
-  for (const entity of prEntities) {
-    try {
-      const bbmodel = await createBBFile(entity, resourcePackPath);
-      const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
-      await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-      core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
-    } catch (error) {
-      core.warning(
-        `Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`
-      );
-    }
-  }
-
-  // Generate "before" models
+  // Generate "before" models (checkout base branch first)
+  core.info(`Checking out base branch (${baseRef}) to generate base models...`);
+  await checkout(baseRef);
   for (const entity of baseEntities) {
     try {
       const bbmodel = await createBBFile(entity, resourcePackPath);
@@ -73,6 +64,22 @@ export async function renderChanges(
     } catch (error) {
       core.warning(
         `Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`
+      );
+    }
+  }
+
+  // Generate "after" models (checkout head branch)
+  core.info(`Checking out head branch (${headRef}) to generate head models...`);
+  await checkout(headRef);
+  for (const entity of prEntities) {
+    try {
+      const bbmodel = await createBBFile(entity, resourcePackPath);
+      const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
+      await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+      core.info(`Generated head bbmodel for ${entity.identifier} at ${modelPath}`);
+    } catch (error) {
+      core.warning(
+        `Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`
       );
     }
   }
