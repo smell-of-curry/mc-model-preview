@@ -44,31 +44,16 @@ interface BedrockGeoFile {
 
 // The Three.js rendering code that runs in the browser - with texture support
 const THREEJS_RENDER_SCRIPT = `
-// Create UV coordinates for a face
-function createFaceUVs(uv, uvSize, textureWidth, textureHeight) {
-  // Convert from pixel coordinates to normalized UV (0-1)
-  const u0 = uv[0] / textureWidth;
-  const v0 = 1 - (uv[1] / textureHeight); // Flip V because Three.js uses bottom-left origin
-  const u1 = (uv[0] + uvSize[0]) / textureWidth;
-  const v1 = 1 - ((uv[1] + uvSize[1]) / textureHeight);
-  
-  return [
-    new THREE.Vector2(u0, v0),
-    new THREE.Vector2(u1, v0),
-    new THREE.Vector2(u0, v1),
-    new THREE.Vector2(u1, v1),
-  ];
-}
-
 // Create a textured cube mesh from Bedrock cube data
-function createTexturedCube(cube, textureWidth, textureHeight, texture, fallbackColor) {
+// bonePivot is needed to position cube relative to its bone
+function createTexturedCube(cube, bonePivot, textureWidth, textureHeight, texture, fallbackColor) {
   const origin = cube.origin || [0, 0, 0];
   const size = cube.size || [1, 1, 1];
   const inflate = cube.inflate || 0;
   
-  const w = size[0] + inflate * 2;
-  const h = size[1] + inflate * 2;
-  const d = size[2] + inflate * 2;
+  const w = Math.abs(size[0]) + inflate * 2;
+  const h = Math.abs(size[1]) + inflate * 2;
+  const d = Math.abs(size[2]) + inflate * 2;
   
   // Determine UV mode
   const uv = cube.uv;
@@ -83,31 +68,51 @@ function createTexturedCube(cube, textureWidth, textureHeight, texture, fallback
     
     if (isPerFaceUV) {
       // Per-face UV mapping
+      // Three.js BoxGeometry face order: +X(east), -X(west), +Y(up), -Y(down), +Z(south), -Z(north)
       const faces = ['east', 'west', 'up', 'down', 'south', 'north'];
-      const faceOrder = [0, 1, 2, 3, 4, 5]; // Three.js face order: +X, -X, +Y, -Y, +Z, -Z
       
       for (let i = 0; i < 6; i++) {
         const faceName = faces[i];
         const faceUV = uv[faceName];
         
         if (faceUV && faceUV.uv && faceUV.uv_size) {
-          // Clone texture and set UV offset/repeat
+          // Clone texture for this face
+          const faceTexture = texture.clone();
+          faceTexture.needsUpdate = true;
+          faceTexture.magFilter = THREE.NearestFilter;
+          faceTexture.minFilter = THREE.NearestFilter;
+          
+          // Handle negative UV sizes (texture flip)
+          let uvX = faceUV.uv[0];
+          let uvY = faceUV.uv[1];
+          let uvW = faceUV.uv_size[0];
+          let uvH = faceUV.uv_size[1];
+          
+          // If negative size, adjust start position
+          if (uvW < 0) {
+            uvX = uvX + uvW;
+            uvW = Math.abs(uvW);
+          }
+          if (uvH < 0) {
+            uvY = uvY + uvH;
+            uvH = Math.abs(uvH);
+          }
+          
+          // Calculate UV offset and repeat (normalized 0-1)
+          const offsetU = uvX / textureWidth;
+          const offsetV = 1 - (uvY + uvH) / textureHeight;
+          const repeatU = uvW / textureWidth;
+          const repeatV = uvH / textureHeight;
+          
+          faceTexture.offset.set(offsetU, offsetV);
+          faceTexture.repeat.set(repeatU, repeatV);
+          
           const mat = new THREE.MeshStandardMaterial({
-            map: texture.clone(),
+            map: faceTexture,
             transparent: true,
             alphaTest: 0.1,
             side: THREE.DoubleSide,
           });
-          
-          // Calculate UV offset and repeat
-          const u = faceUV.uv[0] / textureWidth;
-          const v = 1 - (faceUV.uv[1] + Math.abs(faceUV.uv_size[1])) / textureHeight;
-          const repeatU = Math.abs(faceUV.uv_size[0]) / textureWidth;
-          const repeatV = Math.abs(faceUV.uv_size[1]) / textureHeight;
-          
-          mat.map.offset.set(u, v);
-          mat.map.repeat.set(repeatU, repeatV);
-          mat.map.needsUpdate = true;
           
           materials.push(mat);
         } else {
@@ -121,11 +126,7 @@ function createTexturedCube(cube, textureWidth, textureHeight, texture, fallback
       
       material = materials;
     } else if (isBoxUV) {
-      // Box UV mapping (legacy format)
-      const uvX = uv[0];
-      const uvY = uv[1];
-      
-      // Simplified box UV - just use the texture with calculated offsets
+      // Box UV mapping (legacy format) - simplified
       const mat = new THREE.MeshStandardMaterial({
         map: texture,
         transparent: true,
@@ -146,26 +147,40 @@ function createTexturedCube(cube, textureWidth, textureHeight, texture, fallback
   const geometry = new THREE.BoxGeometry(w, h, d);
   const mesh = new THREE.Mesh(geometry, material);
   
-  // Position: Bedrock uses origin as the corner, Three.js uses center
+  // Position cube relative to bone pivot
+  // Bedrock origin is corner, Three.js uses center, so add size/2
+  // Then subtract bone pivot since bone group is positioned at pivot
   mesh.position.set(
-    origin[0] + size[0] / 2,
-    origin[1] + size[1] / 2,
-    origin[2] + size[2] / 2
+    origin[0] + size[0] / 2 - bonePivot[0],
+    origin[1] + size[1] / 2 - bonePivot[1],
+    origin[2] + size[2] / 2 - bonePivot[2]
   );
   
-  // Handle rotation if present
+  // Handle per-cube rotation if present
   if (cube.rotation && cube.pivot) {
-    const pivot = cube.pivot;
-    const group = new THREE.Group();
-    group.position.set(pivot[0], pivot[1], pivot[2]);
-    mesh.position.sub(new THREE.Vector3(pivot[0], pivot[1], pivot[2]));
-    group.rotation.set(
-      THREE.MathUtils.degToRad(cube.rotation[0] || 0),
-      THREE.MathUtils.degToRad(cube.rotation[1] || 0),
+    const cubePivot = cube.pivot;
+    // Create a group for rotation around cube's pivot
+    const rotGroup = new THREE.Group();
+    // Position rotation group at cube pivot relative to bone
+    rotGroup.position.set(
+      cubePivot[0] - bonePivot[0],
+      cubePivot[1] - bonePivot[1],
+      cubePivot[2] - bonePivot[2]
+    );
+    // Offset mesh from the rotation pivot
+    mesh.position.set(
+      origin[0] + size[0] / 2 - cubePivot[0],
+      origin[1] + size[1] / 2 - cubePivot[1],
+      origin[2] + size[2] / 2 - cubePivot[2]
+    );
+    // Apply rotation (Bedrock uses XYZ order in degrees)
+    rotGroup.rotation.set(
+      THREE.MathUtils.degToRad(-(cube.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(cube.rotation[1] || 0)),
       THREE.MathUtils.degToRad(cube.rotation[2] || 0)
     );
-    group.add(mesh);
-    return group;
+    rotGroup.add(mesh);
+    return rotGroup;
   }
   
   return mesh;
@@ -182,21 +197,23 @@ function createBone(bone, textureWidth, textureHeight, texture, colorIndex) {
   ];
   const boneColor = colors[colorIndex % colors.length];
   
+  const bonePivot = bone.pivot || [0, 0, 0];
+  
   if (bone.cubes) {
     for (const cube of bone.cubes) {
-      const cubeMesh = createTexturedCube(cube, textureWidth, textureHeight, texture, boneColor);
+      const cubeMesh = createTexturedCube(cube, bonePivot, textureWidth, textureHeight, texture, boneColor);
       group.add(cubeMesh);
     }
   }
   
-  if (bone.pivot) {
-    group.position.set(bone.pivot[0], bone.pivot[1], bone.pivot[2]);
-  }
+  // Position bone at its pivot
+  group.position.set(bonePivot[0], bonePivot[1], bonePivot[2]);
   
+  // Apply bone rotation (Bedrock uses XYZ in degrees)
   if (bone.rotation) {
     group.rotation.set(
-      THREE.MathUtils.degToRad(bone.rotation[0] || 0),
-      THREE.MathUtils.degToRad(bone.rotation[1] || 0),
+      THREE.MathUtils.degToRad(-(bone.rotation[0] || 0)),
+      THREE.MathUtils.degToRad(-(bone.rotation[1] || 0)),
       THREE.MathUtils.degToRad(bone.rotation[2] || 0)
     );
   }
@@ -266,6 +283,12 @@ async function renderModel(geometry, textureDataUrl) {
   // Create model group
   const modelGroup = new THREE.Group();
   const boneGroups = new Map();
+  const boneData = new Map();
+  
+  // Store bone data for hierarchy calculations
+  bones.forEach((bone) => {
+    boneData.set(bone.name, bone);
+  });
   
   // First pass: create all bone groups
   bones.forEach((bone, index) => {
@@ -278,15 +301,16 @@ async function renderModel(geometry, textureDataUrl) {
     const boneGroup = boneGroups.get(bone.name);
     if (bone.parent && boneGroups.has(bone.parent)) {
       const parentGroup = boneGroups.get(bone.parent);
-      if (bone.pivot) {
-        const parentBone = bones.find(b => b.name === bone.parent);
-        if (parentBone && parentBone.pivot) {
-          boneGroup.position.sub(new THREE.Vector3(
-            parentBone.pivot[0],
-            parentBone.pivot[1],
-            parentBone.pivot[2]
-          ));
-        }
+      const parentBone = boneData.get(bone.parent);
+      
+      // Child bone position should be relative to parent's pivot
+      if (parentBone && parentBone.pivot) {
+        const childPivot = bone.pivot || [0, 0, 0];
+        boneGroup.position.set(
+          childPivot[0] - parentBone.pivot[0],
+          childPivot[1] - parentBone.pivot[1],
+          childPivot[2] - parentBone.pivot[2]
+        );
       }
       parentGroup.add(boneGroup);
     } else {
