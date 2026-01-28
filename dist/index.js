@@ -74397,39 +74397,7 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
                 const win = window;
                 // Parse our bbmodel JSON
                 const bbmodel = JSON.parse(modelJson);
-                // Verify Blockbench is ready
-                if (!win.Codecs?.bedrock?.parse) {
-                    return { success: false, error: 'Codecs.bedrock.parse not available' };
-                }
-                // Try multiple approaches to create a project
-                let projectCreated = false;
-                // Approach 1: Try Formats.bedrock.new() with error handling
-                if (win.Formats?.bedrock?.new) {
-                    try {
-                        win.Formats.bedrock.new();
-                        projectCreated = true;
-                    }
-                    catch (e) {
-                        console.log('Formats.bedrock.new() failed:', e.message);
-                    }
-                }
-                // Approach 2: If that failed, try creating with ModelProject directly
-                if (!projectCreated && win.ModelProject && win.Formats?.bedrock) {
-                    try {
-                        new win.ModelProject(win.Formats.bedrock);
-                        projectCreated = true;
-                    }
-                    catch (e) {
-                        console.log('ModelProject creation failed:', e.message);
-                    }
-                }
-                // Approach 3: Just try parsing directly - Blockbench might auto-create project
-                if (!projectCreated) {
-                    console.log('Attempting parse without explicit project creation');
-                }
-                await new Promise(resolve => setTimeout(resolve, 500));
-                // Convert our bbmodel format to proper Bedrock geometry format
-                // Our bbmodel has Bedrock bones in the 'elements' array
+                // Build proper Bedrock geometry format
                 const bedrockGeo = {
                     format_version: '1.12.0',
                     'minecraft:geometry': [{
@@ -74441,15 +74409,20 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
                             bones: bbmodel.elements || []
                         }]
                 };
-                // Use the bedrock codec to parse the geometry
-                win.Codecs.bedrock.parse(bedrockGeo);
-                // Wait for render to complete
+                // Use Codecs.bedrock.load() which handles project creation automatically
+                // It expects the parsed object (not string) and a file-like object with name
+                if (win.Codecs?.bedrock?.load) {
+                    win.Codecs.bedrock.load(bedrockGeo, { name: 'model.geo.json' });
+                }
+                else {
+                    return { success: false, error: 'Codecs.bedrock.load not available' };
+                }
+                // Wait for model to load and render
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 // Try to center/fit the model in view
                 if (win.Canvas?.center) {
                     win.Canvas.center();
                 }
-                // Wait a bit more after centering
                 await new Promise(resolve => setTimeout(resolve, 500));
                 // Get the preview canvas
                 const canvas = document.querySelector('#preview canvas');
@@ -74460,7 +74433,7 @@ async function renderModelWithBlockbenchWeb(bbmodelPath, outputPath, browser) {
                 const dataUrl = canvas.toDataURL('image/png');
                 // Verify we got actual image data
                 if (dataUrl.length < 1000) {
-                    return { success: false, error: `Canvas data too small (${dataUrl.length} chars)` };
+                    return { success: false, error: `Canvas data too small (${dataUrl.length} chars) - model may not have loaded` };
                 }
                 // Report element count for debugging
                 const elementCount = win.Outliner?.elements?.length || 0;
