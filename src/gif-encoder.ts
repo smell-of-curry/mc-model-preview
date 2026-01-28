@@ -6,7 +6,7 @@
 import * as core from '@actions/core';
 import * as fs from 'fs/promises';
 import { PNG } from 'pngjs';
-import GifWriter from 'omggif';
+import * as omggif from 'omggif';
 
 // GIF encoding configuration
 export const GIF_CONFIG = {
@@ -169,7 +169,7 @@ export async function createGifFromFrames(
     const gifBuffer = Buffer.alloc(maxSize);
     
     // Create GIF writer
-    const gif = new GifWriter(gifBuffer, width, height, { loop: 0 });
+    const gif = new omggif.GifWriter(gifBuffer, width, height, { loop: 0 });
     
     // Process each frame
     for (let i = 0; i < frames.length; i++) {

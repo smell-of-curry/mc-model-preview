@@ -12,7 +12,7 @@ declare module 'omggif' {
     transparent?: number;
   }
 
-  class GifWriter {
+  export class GifWriter {
     constructor(buffer: Buffer, width: number, height: number, options?: GifWriterOptions);
     addFrame(
       x: number,
@@ -25,5 +25,12 @@ declare module 'omggif' {
     end(): number;
   }
 
-  export = GifWriter;
+  export class GifReader {
+    constructor(buffer: Buffer);
+    width: number;
+    height: number;
+    numFrames(): number;
+    frameInfo(frameNum: number): any;
+    decodeAndBlitFrameRGBA(frameNum: number, pixels: Uint8Array): void;
+  }
 }

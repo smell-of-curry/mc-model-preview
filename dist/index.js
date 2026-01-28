@@ -77682,9 +77682,6 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GIF_CONFIG = void 0;
 exports.calculateFrameCount = calculateFrameCount;
@@ -77693,7 +77690,7 @@ exports.createGifFromFrames = createGifFromFrames;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(91943));
 const pngjs_1 = __nccwpck_require__(10359);
-const omggif_1 = __importDefault(__nccwpck_require__(85676));
+const omggif = __importStar(__nccwpck_require__(85676));
 // GIF encoding configuration
 exports.GIF_CONFIG = {
     width: 400,
@@ -77820,7 +77817,7 @@ async function createGifFromFrames(frames, outputPath, options = {}) {
         const maxSize = width * height * frames.length + 1024 * frames.length;
         const gifBuffer = Buffer.alloc(maxSize);
         // Create GIF writer
-        const gif = new omggif_1.default(gifBuffer, width, height, { loop: 0 });
+        const gif = new omggif.GifWriter(gifBuffer, width, height, { loop: 0 });
         // Process each frame
         for (let i = 0; i < frames.length; i++) {
             try {
