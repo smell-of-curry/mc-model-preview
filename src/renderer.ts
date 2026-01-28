@@ -4,20 +4,199 @@ import * as path from 'path';
 import * as io from '@actions/io';
 import * as fs from 'fs/promises';
 import * as github from '@actions/github';
+import type { Browser, Page } from 'puppeteer-core';
 import { Entity } from './types';
 import { createBBFile } from './blockbench';
 import { uploadImages } from './image-hosting';
 import { postComment } from './comment';
 import { checkout } from './git';
 
+// Dynamic import for puppeteer-core
+async function getPuppeteer() {
+  return await import('puppeteer-core');
+}
+
 const BB_VERSION = '4.11.0';
 const BB_APP_IMAGE = `Blockbench_${BB_VERSION}.AppImage`;
 const BB_EXTRACTED_DIR = 'Blockbench_extracted';
+const REMOTE_DEBUG_PORT = 9222;
 
 async function setupBlockbench(): Promise<void> {
   core.info('Setting up BlockBench...');
   const scriptPath = path.resolve(__dirname, '../scripts/setup-blockbench.sh');
   await exec.exec('bash', [scriptPath]);
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function renderModelWithPuppeteer(
+  bbmodelPath: string,
+  outputPath: string,
+  extractedDir: string
+): Promise<boolean> {
+  const appRunPath = path.join(extractedDir, 'AppRun');
+  
+  // Start Blockbench with remote debugging enabled
+  core.info(`Starting Blockbench with remote debugging on port ${REMOTE_DEBUG_PORT}...`);
+  
+  const env = {
+    ...process.env,
+    APPDIR: extractedDir,
+    LD_LIBRARY_PATH: `${extractedDir}:${extractedDir}/usr/lib:${process.env.LD_LIBRARY_PATH || ''}`,
+    DISPLAY: process.env.DISPLAY || ':99',
+    ELECTRON_NO_UPDATER: '1',
+  };
+
+  // Start xvfb first if not running
+  const xvfbCheck = await exec.getExecOutput('pgrep', ['-x', 'Xvfb'], { ignoreReturnCode: true });
+  if (xvfbCheck.exitCode !== 0) {
+    core.info('Starting Xvfb...');
+    exec.exec('Xvfb', [':99', '-screen', '0', '1280x720x24'], { 
+      env,
+      silent: true,
+    }).catch(() => {}); // Run in background
+    await sleep(1000);
+  }
+
+  // Start Blockbench with remote debugging
+  const blockbenchArgs = [
+    `--remote-debugging-port=${REMOTE_DEBUG_PORT}`,
+    '--no-sandbox',
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
+    '--disable-background-networking',
+    '--disable-component-update',
+  ];
+
+  core.info(`Launching Blockbench: ${appRunPath} ${blockbenchArgs.join(' ')}`);
+  
+  const blockbenchProcess = exec.exec(appRunPath, blockbenchArgs, {
+    env,
+    cwd: extractedDir,
+    silent: true,
+  }).catch((e) => {
+    core.warning(`Blockbench process error: ${e}`);
+  });
+
+  // Wait for Blockbench to start and remote debugging to be available
+  core.info('Waiting for Blockbench to start...');
+  const puppeteer = await getPuppeteer();
+  let browser: Browser | null = null;
+  let attempts = 0;
+  const maxAttempts = 30;
+  
+  while (attempts < maxAttempts) {
+    try {
+      await sleep(2000);
+      browser = await puppeteer.connect({
+        browserURL: `http://127.0.0.1:${REMOTE_DEBUG_PORT}`,
+      });
+      core.info('Connected to Blockbench via Puppeteer');
+      break;
+    } catch (e) {
+      attempts++;
+      if (attempts >= maxAttempts) {
+        core.warning(`Failed to connect to Blockbench after ${maxAttempts} attempts`);
+        return false;
+      }
+    }
+  }
+
+  if (!browser) {
+    return false;
+  }
+
+  try {
+    // Get the main page (Blockbench window)
+    const pages = await browser.pages();
+    if (pages.length === 0) {
+      core.warning('No pages found in Blockbench');
+      return false;
+    }
+    
+    const page = pages[0];
+    core.info(`Found ${pages.length} page(s), using first one`);
+
+    // Wait for Blockbench to fully load
+    await sleep(3000);
+
+    // Read the bbmodel file content
+    const bbmodelContent = await fs.readFile(bbmodelPath, 'utf-8');
+    
+    // Use Blockbench's API to load the model and render
+    core.info('Loading model via Blockbench API...');
+    
+    // The evaluate callback runs in the browser context where Blockbench globals exist
+    const result = await page.evaluate(async (modelJson: string) => {
+      try {
+        // Access Blockbench globals via window to avoid TypeScript errors
+        const win = window as any;
+        
+        // Wait for Blockbench to be ready
+        if (typeof win.Blockbench === 'undefined') {
+          return { success: false, error: 'Blockbench not loaded' };
+        }
+
+        // Parse and load the model
+        const modelData = JSON.parse(modelJson);
+        
+        // Create a new project
+        if (typeof win.newProject === 'function' && win.Formats) {
+          win.newProject(win.Formats.bedrock);
+        }
+
+        // Try to load the model using Codec
+        if (win.Codecs) {
+          const codec = win.Codecs.project || win.Codecs.bedrock;
+          if (codec && codec.parse) {
+            codec.parse(modelData);
+          }
+        }
+
+        // Wait for render
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Get the preview canvas
+        const canvas = document.querySelector('#preview canvas') as HTMLCanvasElement;
+        if (!canvas) {
+          return { success: false, error: 'Canvas not found' };
+        }
+
+        // Get the image data
+        const dataUrl = canvas.toDataURL('image/png');
+        return { success: true, dataUrl };
+      } catch (e: any) {
+        return { success: false, error: e.message || String(e) };
+      }
+    }, bbmodelContent);
+
+    if (!result.success) {
+      core.warning(`Blockbench render failed: ${result.error}`);
+      return false;
+    }
+
+    if (result.dataUrl) {
+      // Convert data URL to buffer and save
+      const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
+      await fs.writeFile(outputPath, Buffer.from(base64Data, 'base64'));
+      core.info(`Saved render to ${outputPath}`);
+      return true;
+    }
+
+    return false;
+  } catch (e) {
+    core.warning(`Puppeteer render error: ${e}`);
+    return false;
+  } finally {
+    // Disconnect (don't close, let the process handle it)
+    if (browser) {
+      await browser.disconnect();
+    }
+    // Kill Blockbench
+    await exec.exec('pkill', ['-f', 'blockbench'], { ignoreReturnCode: true });
+  }
 }
 
 export async function renderChanges(
@@ -38,18 +217,15 @@ export async function renderChanges(
   core.info(`Created temporary directory for rendering at ${tempDir}`);
 
   // Determine Blockbench executable path (prefer extracted AppRun)
-  const appImagePath = path.join(process.cwd(), BB_APP_IMAGE);
   const extractedDir = path.join(process.cwd(), BB_EXTRACTED_DIR);
   const extractedAppRunPath = path.join(extractedDir, 'AppRun');
-  let bbExecutable = extractedAppRunPath;
+  
   try {
     await fs.access(extractedAppRunPath);
-    // Ensure executable bit
-    try { await fs.chmod(extractedAppRunPath, 0o755); } catch {}
+    await fs.chmod(extractedAppRunPath, 0o755);
     core.info(`Using extracted Blockbench executable at ${extractedAppRunPath}`);
   } catch {
-    bbExecutable = appImagePath;
-    core.info(`Using AppImage at ${appImagePath}`);
+    core.warning('Blockbench AppRun not found');
   }
 
   // Generate "before" models (already on base branch from main.ts)
@@ -83,8 +259,8 @@ export async function renderChanges(
     }
   }
 
-  // Render the models
-  core.info('Rendering models with BlockBench...');
+  // Render the models using Puppeteer
+  core.info('Rendering models with BlockBench via Puppeteer...');
   const filesToRender = await fs.readdir(tempDir);
 
   for (const file of filesToRender) {
@@ -95,163 +271,15 @@ export async function renderChanges(
       const variant = variantMatch ? variantMatch[1] : 'render';
       const safeBaseName = `${toSafeFilename(identifierPart)}.${variant}.png`;
       const outputPath = path.join(tempDir, safeBaseName);
-      core.info(`About to render: modelPath=${modelPath} -> outputPath=${outputPath}`);
-      try {
-        // Run under xvfb if available to satisfy Electron's display requirements
-        // Precompute if xvfb-run exists
-        const tryXvfb = await exec.getExecOutput('which', ['xvfb-run'], { ignoreReturnCode: true });
-
-        // Build common Blockbench args with extra Electron flags for headless CI rendering
-        // IMPORTANT: We need software rendering in CI since there's no GPU
-        // - Do NOT disable software rasterizer (we need it!)
-        // - Disable auto-updates to prevent timeout from downloading new versions
-        // - Use SwiftShader for software rendering
-        const bbArgs = [
-          '--headless',
-          '--no-sandbox',
-          '--disable-gpu',
-          '--disable-dev-shm-usage',
-          '--disable-features=VizDisplayCompositor',
-          '--disable-background-networking',  // Prevent auto-update downloads
-          '--disable-breakpad',               // Disable crash reporter
-          '--disable-component-update',       // Disable component updates
-          '--use-gl=swiftshader',             // Use SwiftShader directly (simpler than ANGLE)
-          '--enable-webgl-software-rendering',
-          `--project=${modelPath}`,
-          `--export=${outputPath}`,
-          '--render',
-        ];
-
-        // If using extracted AppRun, set APPDIR and cwd to extracted root
-        // Also set library paths and software rendering environment variables
-        const env = {
-          ...process.env,
-          APPDIR: extractedDir,
-          APPIMAGE: appImagePath,
-          // Add extracted dir to library path so libffmpeg.so can be found
-          LD_LIBRARY_PATH: `${extractedDir}:${extractedDir}/usr/lib:${process.env.LD_LIBRARY_PATH || ''}`,
-          // Force software rendering
-          LIBGL_ALWAYS_SOFTWARE: '1',
-          MESA_GL_VERSION_OVERRIDE: '3.3',
-          // SwiftShader settings
-          VK_ICD_FILENAMES: path.join(extractedDir, 'vk_swiftshader_icd.json'),
-          // Display for xvfb
-          DISPLAY: process.env.DISPLAY || ':99',
-          // Disable Electron auto-updates
-          ELECTRON_NO_UPDATER: '1',
-        };
-        const options = { cwd: extractedDir, env } as any;
-
-        // Try in this order:
-        // 1) xvfb-run + AppRun (preferred)
-        // 2) AppRun directly
-        // 3) xvfb-run + AppImage --appimage-extract-and-run
-        // 4) AppImage --appimage-extract-and-run directly
-        let ran = false;
-        const killAfterMs = 120000; // 2 minutes per render
-        let timeoutHandle: NodeJS.Timeout | undefined;
-        async function execWithTimeout(cmd: string, args: string[], opts?: any) {
-          return await new Promise<void>((resolve, reject) => {
-            let finished = false;
-            timeoutHandle = setTimeout(() => {
-              if (!finished) {
-                finished = true;
-                reject(new Error(`Timeout after ${killAfterMs}ms running ${cmd}`));
-              }
-            }, killAfterMs);
-            exec.exec(cmd, args, opts)
-              .then(() => {
-                if (!finished) {
-                  finished = true;
-                  if (timeoutHandle) clearTimeout(timeoutHandle);
-                  resolve();
-                }
-              })
-              .catch((e) => {
-                if (!finished) {
-                  finished = true;
-                  if (timeoutHandle) clearTimeout(timeoutHandle);
-                  reject(e);
-                }
-              });
-          });
-        }
-
-        if (bbExecutable === extractedAppRunPath) {
-          if (tryXvfb.exitCode === 0) {
-            try {
-              core.info(`Attempting xvfb-run + AppRun render...`);
-              await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', extractedAppRunPath, ...bbArgs], options);
-              ran = true;
-              core.info(`xvfb-run + AppRun completed`);
-            } catch (e) {
-              core.warning(`xvfb-run + AppRun failed: ${e}`);
-            }
-          }
-          if (!ran) {
-            try {
-              core.info(`Attempting direct AppRun render...`);
-              await execWithTimeout(extractedAppRunPath, bbArgs, options);
-              ran = true;
-              core.info(`Direct AppRun completed`);
-            } catch (e) {
-              core.warning(`Direct AppRun failed: ${e}`);
-            }
-          }
-        }
-
-        if (!ran) {
-          // Fallback to AppImage extract-and-run
-          const appImageArgs = ['--appimage-extract-and-run', ...bbArgs];
-          // Use same environment for AppImage runs
-          const appImageOptions = { env } as any;
-          if (tryXvfb.exitCode === 0) {
-            try {
-              core.info(`Attempting xvfb-run + AppImage extract-and-run...`);
-              await execWithTimeout('xvfb-run', ['--auto-servernum', '--server-args=-screen 0 1280x720x24', appImagePath, ...appImageArgs], appImageOptions);
-              ran = true;
-              core.info(`xvfb-run + AppImage completed`);
-            } catch (e) {
-              core.warning(`xvfb-run + AppImage failed: ${e}`);
-            }
-          }
-          if (!ran) {
-            core.info(`Attempting direct AppImage extract-and-run...`);
-            await execWithTimeout(appImagePath, appImageArgs, appImageOptions);
-            ran = true;
-            core.info(`Direct AppImage completed`);
-          }
-        }
-        // Verify output exists; if not, attempt recovery from extracted dir
-        let exists = false;
-        try {
-          await fs.stat(outputPath);
-          exists = true;
-        } catch {}
-        if (!exists) {
-          const candidate = path.join(extractedDir, safeBaseName);
-          try {
-            await fs.stat(candidate);
-            // Move to expected location
-            try {
-              await fs.rename(candidate, outputPath);
-            } catch {
-              // cross-device fallback: copy then unlink
-              const data = await fs.readFile(candidate);
-              await fs.writeFile(outputPath, data);
-              try { await fs.unlink(candidate); } catch {}
-            }
-            exists = true;
-            core.info(`Recovered output from extracted dir: ${candidate} -> ${outputPath}`);
-          } catch {}
-        }
-        if (exists) {
-          core.info(`Rendered ${file} to ${outputPath}`);
-        } else {
-          core.warning(`Render reported success but output not found: ${outputPath}`);
-        }
-      } catch (error) {
-        core.warning(`Failed to render ${file}: ${error}`);
+      
+      core.info(`Rendering: ${modelPath} -> ${outputPath}`);
+      
+      const success = await renderModelWithPuppeteer(modelPath, outputPath, extractedDir);
+      
+      if (success) {
+        core.info(`Successfully rendered ${file}`);
+      } else {
+        core.warning(`Failed to render ${file}`);
       }
     }
   }
@@ -260,11 +288,6 @@ export async function renderChanges(
   try {
     const listAfter = await fs.readdir(tempDir);
     core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
-    // Also list extracted dir to see if outputs landed there
-    try {
-      const listExtracted = await fs.readdir(extractedDir);
-      core.info(`Extracted dir contents: ${JSON.stringify(listExtracted)}`);
-    } catch {}
   } catch {}
 
   const publicUrls = await uploadImages(tempDir, github.context.issue.number);
