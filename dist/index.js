@@ -127190,9 +127190,13 @@ async function run() {
             resourcePackPath = normalizedWorkspace;
         }
         core.info(`Using resource pack path: ${resourcePackPath}`);
-        // 1. Store HEAD SHA before any operations (needed for PR merge refs)
-        const headSha = await (0, git_1.getHeadSha)();
-        core.info(`Stored HEAD SHA: ${headSha}`);
+        // 1. Get the actual PR head SHA (not the merge commit that Actions creates)
+        // The merge commit is ephemeral and doesn't persist between runs
+        const prHeadSha = github.context.payload.pull_request?.head?.sha;
+        const mergeCommitSha = await (0, git_1.getHeadSha)();
+        const headSha = prHeadSha || mergeCommitSha;
+        core.info(`PR head SHA: ${headSha}${prHeadSha ? '' : ' (using merge commit as fallback)'}`);
+        core.info(`Merge commit SHA: ${mergeCommitSha}`);
         // 2. Fetch existing render state for incremental rendering
         const prNumber = github.context.issue.number;
         const previousState = await (0, render_state_1.fetchRenderState)(prNumber);
@@ -127933,9 +127937,28 @@ async function fetchRenderState(prNumber) {
     return null;
 }
 /**
+ * Check if a commit exists in the repository
+ */
+async function commitExists(commitSha) {
+    try {
+        const result = await exec.getExecOutput('git', ['cat-file', '-t', commitSha], { ignoreReturnCode: true, silent: true });
+        return result.exitCode === 0 && result.stdout.trim() === 'commit';
+    }
+    catch {
+        return false;
+    }
+}
+/**
  * Check if a commit is an ancestor of HEAD (used to detect force pushes)
+ * Also handles the case where the commit doesn't exist (returns false)
  */
 async function isCommitAncestor(commitSha) {
+    // First check if the commit even exists
+    const exists = await commitExists(commitSha);
+    if (!exists) {
+        core.info(`Commit ${commitSha.substring(0, 7)} not found in repository (may be an ephemeral merge commit)`);
+        return false;
+    }
     try {
         const result = await exec.getExecOutput('git', ['merge-base', '--is-ancestor', commitSha, 'HEAD'], { ignoreReturnCode: true, silent: true });
         return result.exitCode === 0;
@@ -127989,10 +128012,11 @@ async function determineChangedEntities(currentEntities, previousState, resource
             isFirstRun: true,
         };
     }
-    // Check if the last processed commit is still an ancestor (detect force push)
+    // Check if the last processed commit is still an ancestor (detect force push or missing commit)
     const isAncestor = await isCommitAncestor(previousState.lastProcessedCommit);
     if (!isAncestor) {
-        core.info('Force push detected - invalidating previous state, will render all affected entities');
+        core.info('Previous commit is not an ancestor of current HEAD (force push or commit not found)');
+        core.info('Invalidating previous state - will render all affected entities');
         return {
             entitiesToRender: currentEntities,
             unchangedEntities: [],

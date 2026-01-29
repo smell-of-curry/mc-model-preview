@@ -69,9 +69,13 @@ async function run(): Promise<void> {
     }
     core.info(`Using resource pack path: ${resourcePackPath}`);
 
-    // 1. Store HEAD SHA before any operations (needed for PR merge refs)
-    const headSha = await getHeadSha();
-    core.info(`Stored HEAD SHA: ${headSha}`);
+    // 1. Get the actual PR head SHA (not the merge commit that Actions creates)
+    // The merge commit is ephemeral and doesn't persist between runs
+    const prHeadSha = github.context.payload.pull_request?.head?.sha;
+    const mergeCommitSha = await getHeadSha();
+    const headSha = prHeadSha || mergeCommitSha;
+    core.info(`PR head SHA: ${headSha}${prHeadSha ? '' : ' (using merge commit as fallback)'}`);
+    core.info(`Merge commit SHA: ${mergeCommitSha}`);
 
     // 2. Fetch existing render state for incremental rendering
     const prNumber = github.context.issue.number;

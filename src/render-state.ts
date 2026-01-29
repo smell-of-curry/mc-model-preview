@@ -140,9 +140,33 @@ export async function fetchRenderState(prNumber: number): Promise<RenderState | 
 }
 
 /**
+ * Check if a commit exists in the repository
+ */
+async function commitExists(commitSha: string): Promise<boolean> {
+  try {
+    const result = await exec.getExecOutput(
+      'git',
+      ['cat-file', '-t', commitSha],
+      { ignoreReturnCode: true, silent: true }
+    );
+    return result.exitCode === 0 && result.stdout.trim() === 'commit';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check if a commit is an ancestor of HEAD (used to detect force pushes)
+ * Also handles the case where the commit doesn't exist (returns false)
  */
 export async function isCommitAncestor(commitSha: string): Promise<boolean> {
+  // First check if the commit even exists
+  const exists = await commitExists(commitSha);
+  if (!exists) {
+    core.info(`Commit ${commitSha.substring(0, 7)} not found in repository (may be an ephemeral merge commit)`);
+    return false;
+  }
+  
   try {
     const result = await exec.getExecOutput(
       'git',
@@ -217,10 +241,11 @@ export async function determineChangedEntities(
     };
   }
   
-  // Check if the last processed commit is still an ancestor (detect force push)
+  // Check if the last processed commit is still an ancestor (detect force push or missing commit)
   const isAncestor = await isCommitAncestor(previousState.lastProcessedCommit);
   if (!isAncestor) {
-    core.info('Force push detected - invalidating previous state, will render all affected entities');
+    core.info('Previous commit is not an ancestor of current HEAD (force push or commit not found)');
+    core.info('Invalidating previous state - will render all affected entities');
     return {
       entitiesToRender: currentEntities,
       unchangedEntities: [],
