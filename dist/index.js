@@ -127624,13 +127624,15 @@ async function pushImagesToBranch(artifactPath, metadata) {
     ]);
     // Stage, commit, and push
     await exec.exec('git', ['add', prFolder]);
-    // Check if there are changes to commit
-    const status = await exec.getExecOutput('git', ['status', '--porcelain']);
-    if (!status.stdout.trim()) {
-        core.info('No changes to commit - images may already exist');
-        // Still build URLs from existing images
+    // Check if there are actually staged changes to commit
+    // Use --cached to check only staged changes, not untracked files
+    const stagedChanges = await exec.getExecOutput('git', ['diff', '--cached', '--name-only']);
+    if (!stagedChanges.stdout.trim()) {
+        core.info('No staged changes to commit - images may already exist with same content');
+        // Still build URLs from existing images on branch
     }
     else {
+        core.info(`Committing ${stagedChanges.stdout.trim().split('\n').length} changed files`);
         await exec.exec('git', ['commit', '-m', commitMsg]);
         await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
     }
