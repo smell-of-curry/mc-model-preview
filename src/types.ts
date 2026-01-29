@@ -90,3 +90,25 @@ export interface BoneTransform {
 export interface AnimationEvaluation {
   bones: Record<string, BoneTransform>;
 }
+
+// Incremental rendering state types
+
+export interface RenderState {
+  /** The last commit SHA that was processed */
+  lastProcessedCommit: string;
+  /** ISO timestamp of when the last render occurred */
+  lastRenderTimestamp: string;
+  /** Map of entity identifier to its render state */
+  renderedEntities: Record<string, EntityRenderState>;
+}
+
+export interface EntityRenderState {
+  /** The entity identifier (e.g., "pokemon:pikachu") */
+  identifier: string;
+  /** Hash of all source files (entity, geometry, texture, animation) */
+  sourceFilesHash: string;
+  /** The commit SHA when this entity was last rendered */
+  renderedCommit: string;
+  /** Whether the entity has a shiny variant */
+  hasShiny: boolean;
+}

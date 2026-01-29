@@ -126245,8 +126245,18 @@ const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
 async function postComment(imageUrls, animationUrls = [], options = {}) {
     core.info('Generating PR comment...');
-    const { isForkPR, artifactName, affectedEntities } = options;
-    let body = `## Minecraft Model Preview\n\n`;
+    const { isForkPR, artifactName, affectedEntities, isIncremental, commitSha } = options;
+    // Build header with incremental context
+    let body = `## Minecraft Model Preview`;
+    if (commitSha) {
+        const shortSha = commitSha.substring(0, 7);
+        body += ` (${shortSha})`;
+    }
+    body += `\n\n`;
+    // Add incremental notice if applicable
+    if (isIncremental) {
+        body += `> This comment shows only the models changed in the latest commit.\n\n`;
+    }
     // For fork PRs without image URLs, show a helpful message
     if (isForkPR && imageUrls.every(u => !u.base && !u.head)) {
         body += `> **Note:** This pull request is from a fork. Due to GitHub security restrictions, `;
@@ -126381,9 +126391,11 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getChangedFiles = getChangedFiles;
+exports.getChangedFilesSinceCommit = getChangedFilesSinceCommit;
 exports.findAffectedEntities = findAffectedEntities;
 exports.findChangedAnimations = findChangedAnimations;
 const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
 const github = __importStar(__nccwpck_require__(93228));
 const fs = __importStar(__nccwpck_require__(91943));
 const path = __importStar(__nccwpck_require__(16928));
@@ -126402,6 +126414,27 @@ async function getChangedFiles() {
         pull_number,
     });
     return files.map((file) => file.filename);
+}
+/**
+ * Get files changed since a specific commit
+ * Uses git diff to find files changed between the given commit and HEAD
+ * This is used for incremental rendering to only re-render what changed
+ */
+async function getChangedFilesSinceCommit(baseSha) {
+    try {
+        const result = await exec.getExecOutput('git', ['diff', '--name-only', `${baseSha}...HEAD`], { silent: true });
+        const files = result.stdout
+            .split('\n')
+            .map(f => f.trim())
+            .filter(Boolean);
+        core.info(`Found ${files.length} files changed since commit ${baseSha.substring(0, 7)}`);
+        return files;
+    }
+    catch (error) {
+        core.warning(`Failed to get changed files since ${baseSha}: ${error}`);
+        // Fall back to getting all PR files
+        return getChangedFiles();
+    }
 }
 function findAffectedEntities(allEntities, changedFiles) {
     const affectedEntities = new Set();
@@ -126908,10 +126941,10 @@ async function uploadImagesAsArtifact(imageDir, prNumber, metadata) {
         await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
         core.info(`Saved metadata to ${metadataPath}`);
     }
-    // Find all image files and metadata (exclude .bbmodel - they contain colons which are invalid for artifacts)
+    // Find all image files, metadata, and render state (exclude .bbmodel - they contain colons which are invalid for artifacts)
     const found = await exec.getExecOutput('bash', [
         '-lc',
-        `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'metadata.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
+        `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'metadata.json' -o -name 'render-state.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
     ]);
     const files = found.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     if (files.length === 0) {
@@ -126925,14 +126958,15 @@ async function uploadImagesAsArtifact(imageDir, prNumber, metadata) {
 }
 /**
  * Upload images to the orphan branch (for non-fork PRs)
+ * Preserves existing images for incremental rendering
  */
 async function uploadImagesToBranch(imageDir, prNumber) {
-    core.info('Uploading images to orphan branch...');
+    core.info('Uploading images to orphan branch (incremental mode)...');
     const repo = `${github.context.repo.owner}/${github.context.repo.repo}`;
     const token = core.getInput('github-token');
     // Use token-authenticated URL for push access
     const repoUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
-    const commitMsg = `Add images for PR #${prNumber}`;
+    const commitMsg = `Update images for PR #${prNumber}`;
     const remoteName = `origin-${IMAGE_BRANCH}`;
     // Ensure remote exists (ignore if already added)
     try {
@@ -126947,9 +126981,11 @@ async function uploadImagesToBranch(imageDir, prNumber) {
         remoteName,
         IMAGE_BRANCH,
     ]);
+    const prFolder = `pr-${prNumber}`;
     if (lsRemote.stdout && lsRemote.stdout.trim().length > 0) {
         // Remote branch exists: create local tracking branch
         await exec.exec('git', ['checkout', '-B', IMAGE_BRANCH, `${remoteName}/${IMAGE_BRANCH}`]);
+        core.info(`Checked out existing ${IMAGE_BRANCH} branch - preserving existing images`);
     }
     else {
         // Create orphan branch for images
@@ -126959,6 +126995,7 @@ async function uploadImagesToBranch(imageDir, prNumber) {
             await exec.exec('git', ['rm', '-rf', '.']);
         }
         catch { }
+        core.info(`Created new orphan branch ${IMAGE_BRANCH}`);
     }
     // Configure git user
     await exec.exec('git', ['config', 'user.name', 'github-actions[bot]']);
@@ -126967,29 +127004,51 @@ async function uploadImagesToBranch(imageDir, prNumber) {
         'user.email',
         'github-actions[bot]@users.noreply.github.com',
     ]);
-    // Copy images into a dedicated folder per PR to avoid collisions
-    const prFolder = `pr-${prNumber}`;
+    // Ensure PR folder exists (preserves existing files)
     await exec.exec('mkdir', ['-p', prFolder]);
-    await exec.exec('cp', ['-r', `${imageDir}/.`, prFolder]);
+    // Copy new/updated images into the PR folder (preserves existing files)
+    // Using cp without -r on individual files to merge rather than replace
+    const newFiles = await exec.getExecOutput('bash', [
+        '-lc',
+        `find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'render-state.json' \\) -print`,
+    ]);
+    const filesToCopy = newFiles.stdout.split('\n').map(s => s.trim()).filter(Boolean);
+    core.info(`Copying ${filesToCopy.length} new/updated files to ${prFolder}`);
+    for (const file of filesToCopy) {
+        const filename = path.basename(file);
+        await exec.exec('cp', [file, `${prFolder}/${filename}`]);
+    }
     // Only stage the PR folder
     await exec.exec('git', ['add', prFolder]);
-    // For debugging, list what we're about to commit
-    await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git ls-files -s ${prFolder} | cat`]);
-    await exec.exec('git', ['commit', '-m', commitMsg]);
-    await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
-    const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
-    const imageUrls = {};
-    // Recursively discover PNGs and GIFs to support nested outputs
-    const found = await exec.getExecOutput('bash', [
-        '-lc',
-        `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' \\) -printf '%p\n' | sort | cat`,
-    ]);
-    core.info(`Uploader discovered images under ${imageDir}:\n${found.stdout}`);
-    for (const absPath of found.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
-        const relPath = path.relative(imageDir, absPath).replace(/\\/g, '/');
-        const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${relPath}`;
-        imageUrls[absPath] = publicUrl;
+    // Check if there are changes to commit
+    const status = await exec.getExecOutput('git', ['status', '--porcelain']);
+    if (!status.stdout.trim()) {
+        core.info('No changes to commit - images may be identical to previous render');
+        // Still need to get commit SHA for URL building
     }
+    else {
+        // For debugging, list what we're about to commit
+        await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git diff --cached --name-only | cat`]);
+        await exec.exec('git', ['commit', '-m', commitMsg]);
+        await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
+    }
+    const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
+    // Build URLs for ALL images in the PR folder (including previously uploaded ones)
+    const imageUrls = {};
+    // Get all images from the PR folder on the branch (not just newly uploaded)
+    const allPrImages = await exec.getExecOutput('bash', [
+        '-lc',
+        `find '${prFolder}' -type f \\( -name '*.png' -o -name '*.gif' \\) -print | sort`,
+    ]);
+    for (const branchPath of allPrImages.stdout.split('\n').map(s => s.trim()).filter(Boolean)) {
+        const filename = path.basename(branchPath);
+        const localPath = path.join(imageDir, filename);
+        const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${branchPath}`;
+        // Map both the local path (for newly rendered) and branch path
+        imageUrls[localPath] = publicUrl;
+        imageUrls[branchPath] = publicUrl;
+    }
+    core.info(`Built URLs for ${Object.keys(imageUrls).length / 2} images (including existing)`);
     core.info('Image upload complete.');
     return imageUrls;
 }
@@ -127087,6 +127146,7 @@ const differ_1 = __nccwpck_require__(58907);
 const git_1 = __nccwpck_require__(71243);
 const renderer_1 = __nccwpck_require__(2040);
 const post_comment_1 = __nccwpck_require__(1229);
+const render_state_1 = __nccwpck_require__(92651);
 async function run() {
     try {
         core.info('Starting Minecraft Model Preview action...');
@@ -127129,29 +127189,56 @@ async function run() {
             resourcePackPath = normalizedWorkspace;
         }
         core.info(`Using resource pack path: ${resourcePackPath}`);
-        // 1. Get changed files & parse head branch
-        const changedFiles = await (0, differ_1.getChangedFiles)();
+        // 1. Store HEAD SHA before any operations (needed for PR merge refs)
+        const headSha = await (0, git_1.getHeadSha)();
+        core.info(`Stored HEAD SHA: ${headSha}`);
+        // 2. Fetch existing render state for incremental rendering
+        const prNumber = github.context.issue.number;
+        const previousState = await (0, render_state_1.fetchRenderState)(prNumber);
+        // 3. Get changed files - either since last render or full PR
+        let changedFilesSinceLastCommit = [];
+        if (previousState) {
+            changedFilesSinceLastCommit = await (0, differ_1.getChangedFilesSinceCommit)(previousState.lastProcessedCommit);
+            core.info(`Incremental mode: ${changedFilesSinceLastCommit.length} files changed since last render`);
+        }
+        // 4. Get all changed files in the PR (for initial entity detection)
+        const allChangedFiles = await (0, differ_1.getChangedFiles)();
         const headEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
-        const affectedHeadEntities = (0, differ_1.findAffectedEntities)(headEntities, changedFiles);
-        if (affectedHeadEntities.length === 0) {
+        const allAffectedEntities = (0, differ_1.findAffectedEntities)(headEntities, allChangedFiles);
+        if (allAffectedEntities.length === 0) {
             core.info('No model changes detected in this pull request.');
             return;
         }
-        core.info(`Found ${affectedHeadEntities.length} affected entities on HEAD (${headRef}): ${affectedHeadEntities
+        core.info(`Found ${allAffectedEntities.length} total affected entities in PR: ${allAffectedEntities
             .map((e) => e.identifier)
             .join(', ')}`);
-        // 2. Store HEAD SHA before any checkouts (needed for PR merge refs)
-        const headSha = await (0, git_1.getHeadSha)();
-        core.info(`Stored HEAD SHA: ${headSha}`);
-        // 3. Checkout base branch and parse
+        // 5. Determine which entities actually need rendering (incremental)
+        const { entitiesToRender, unchangedEntities, isFirstRun } = await (0, render_state_1.determineChangedEntities)(allAffectedEntities, previousState, resourcePackPath, changedFilesSinceLastCommit);
+        if (entitiesToRender.length === 0) {
+            core.info('No entities changed since last render - nothing to do.');
+            return;
+        }
+        core.info(`Will render ${entitiesToRender.length} entities: ${entitiesToRender
+            .map((e) => e.identifier)
+            .join(', ')}`);
+        if (unchangedEntities.length > 0) {
+            core.info(`Skipping ${unchangedEntities.length} unchanged entities: ${unchangedEntities
+                .map((e) => e.identifier)
+                .join(', ')}`);
+        }
+        // 6. Checkout base branch and parse
         core.info(`Checking out base branch: ${baseRef}`);
         await (0, git_1.checkout)(baseRef);
         const baseEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
-        // Filter base entities to only include those affected in the PR
-        const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
-        const affectedBaseEntities = baseEntities.filter((e) => affectedEntityIds.includes(e.identifier));
-        // Render changes - pass base ref and head SHA for checkouts
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, affectedHeadEntities, resourcePackPath, baseRef, headSha);
+        // Filter base entities to only include those we're rendering
+        const entitiesToRenderIds = entitiesToRender.map((e) => e.identifier);
+        const affectedBaseEntities = baseEntities.filter((e) => entitiesToRenderIds.includes(e.identifier));
+        // 7. Render changes - pass incremental context
+        await (0, renderer_1.renderChanges)(affectedBaseEntities, entitiesToRender, resourcePackPath, baseRef, headSha, {
+            previousState,
+            unchangedEntities,
+            isFirstRun,
+        });
         core.info('Action completed successfully.');
         process.exit(0);
     }
@@ -127677,6 +127764,251 @@ async function postCommentForPR(imageUrlSets, animationUrlSets, metadata) {
 
 /***/ }),
 
+/***/ 92651:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.fetchRenderState = fetchRenderState;
+exports.isCommitAncestor = isCommitAncestor;
+exports.computeEntityHash = computeEntityHash;
+exports.determineChangedEntities = determineChangedEntities;
+exports.createRenderState = createRenderState;
+exports.saveRenderStateToFile = saveRenderStateToFile;
+/**
+ * Render state management for incremental rendering
+ * Tracks which entities have been rendered and their source file hashes
+ */
+const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
+const github = __importStar(__nccwpck_require__(93228));
+const crypto = __importStar(__nccwpck_require__(76982));
+const fs = __importStar(__nccwpck_require__(91943));
+const path = __importStar(__nccwpck_require__(16928));
+const IMAGE_BRANCH = 'mc-model-preview-images';
+const STATE_FILENAME = 'render-state.json';
+/**
+ * Fetch the existing render state for a PR from the image branch
+ * Returns null if no state exists (first run)
+ */
+async function fetchRenderState(prNumber) {
+    const repo = `${github.context.repo.owner}/${github.context.repo.repo}`;
+    const token = core.getInput('github-token');
+    const octokit = github.getOctokit(token);
+    const prFolder = `pr-${prNumber}`;
+    const statePath = `${prFolder}/${STATE_FILENAME}`;
+    try {
+        const { data } = await octokit.rest.repos.getContent({
+            owner: github.context.repo.owner,
+            repo: github.context.repo.repo,
+            path: statePath,
+            ref: IMAGE_BRANCH,
+        });
+        if ('content' in data && data.type === 'file') {
+            const content = Buffer.from(data.content, 'base64').toString('utf-8');
+            const state = JSON.parse(content);
+            core.info(`Fetched existing render state from ${IMAGE_BRANCH}/${statePath}`);
+            core.info(`Last processed commit: ${state.lastProcessedCommit}`);
+            core.info(`Previously rendered entities: ${Object.keys(state.renderedEntities).length}`);
+            return state;
+        }
+    }
+    catch (error) {
+        if (error.status === 404) {
+            core.info(`No existing render state found for PR #${prNumber} (first run)`);
+            return null;
+        }
+        core.warning(`Failed to fetch render state: ${error.message}`);
+    }
+    return null;
+}
+/**
+ * Check if a commit is an ancestor of HEAD (used to detect force pushes)
+ */
+async function isCommitAncestor(commitSha) {
+    try {
+        const result = await exec.getExecOutput('git', ['merge-base', '--is-ancestor', commitSha, 'HEAD'], { ignoreReturnCode: true, silent: true });
+        return result.exitCode === 0;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Compute a hash of all source files for an entity
+ * This includes: entity file, geometry files, texture files, animation files, material files
+ */
+async function computeEntityHash(entity, resourcePackPath) {
+    const hash = crypto.createHash('sha256');
+    // Collect all source files
+    const sourceFiles = [
+        entity.entityFilePath,
+        ...entity.geometryFiles,
+        ...entity.textureFiles,
+        ...entity.animationFiles,
+        ...entity.materialFiles,
+    ];
+    // Sort for deterministic ordering
+    sourceFiles.sort();
+    for (const file of sourceFiles) {
+        try {
+            const fullPath = path.join(resourcePackPath, file);
+            const content = await fs.readFile(fullPath);
+            // Include the filename in the hash to detect renames
+            hash.update(file);
+            hash.update(content);
+        }
+        catch (error) {
+            // File might not exist (e.g., deleted), include that fact in hash
+            hash.update(`MISSING:${file}`);
+        }
+    }
+    return hash.digest('hex');
+}
+/**
+ * Determine which entities have changed since the last render
+ * Returns entities that need to be re-rendered
+ */
+async function determineChangedEntities(currentEntities, previousState, resourcePackPath, changedFilesSinceLastCommit) {
+    // First run - render everything
+    if (!previousState) {
+        core.info('First run detected - will render all affected entities');
+        return {
+            entitiesToRender: currentEntities,
+            unchangedEntities: [],
+            isFirstRun: true,
+        };
+    }
+    // Check if the last processed commit is still an ancestor (detect force push)
+    const isAncestor = await isCommitAncestor(previousState.lastProcessedCommit);
+    if (!isAncestor) {
+        core.info('Force push detected - invalidating previous state, will render all affected entities');
+        return {
+            entitiesToRender: currentEntities,
+            unchangedEntities: [],
+            isFirstRun: false,
+        };
+    }
+    const entitiesToRender = [];
+    const unchangedEntities = [];
+    // Build a set of changed files for quick lookup
+    const changedFilesSet = new Set(changedFilesSinceLastCommit);
+    for (const entity of currentEntities) {
+        const previousEntityState = previousState.renderedEntities[entity.identifier];
+        // New entity - needs rendering
+        if (!previousEntityState) {
+            core.info(`Entity ${entity.identifier} is new - will render`);
+            entitiesToRender.push(entity);
+            continue;
+        }
+        // Check if any of this entity's source files changed
+        const entityFiles = [
+            entity.entityFilePath,
+            ...entity.geometryFiles,
+            ...entity.textureFiles,
+            ...entity.animationFiles,
+            ...entity.materialFiles,
+        ];
+        const hasChangedFile = entityFiles.some(file => changedFilesSet.has(file));
+        if (!hasChangedFile) {
+            core.info(`Entity ${entity.identifier} has no changed files since last commit - skipping`);
+            unchangedEntities.push(entity);
+            continue;
+        }
+        // Files changed - compute hash to see if content actually differs
+        const currentHash = await computeEntityHash(entity, resourcePackPath);
+        if (currentHash === previousEntityState.sourceFilesHash) {
+            core.info(`Entity ${entity.identifier} hash unchanged - skipping`);
+            unchangedEntities.push(entity);
+            continue;
+        }
+        core.info(`Entity ${entity.identifier} has changed (hash differs) - will render`);
+        entitiesToRender.push(entity);
+    }
+    core.info(`Incremental render: ${entitiesToRender.length} entities to render, ${unchangedEntities.length} unchanged`);
+    return {
+        entitiesToRender,
+        unchangedEntities,
+        isFirstRun: false,
+    };
+}
+/**
+ * Create a new render state from the current render results
+ */
+async function createRenderState(renderedEntities, unchangedEntities, previousState, resourcePackPath, currentCommitSha, hasShinyMap) {
+    const state = {
+        lastProcessedCommit: currentCommitSha,
+        lastRenderTimestamp: new Date().toISOString(),
+        renderedEntities: {},
+    };
+    // Copy over unchanged entities from previous state
+    if (previousState) {
+        for (const entity of unchangedEntities) {
+            const prevEntityState = previousState.renderedEntities[entity.identifier];
+            if (prevEntityState) {
+                state.renderedEntities[entity.identifier] = prevEntityState;
+            }
+        }
+    }
+    // Add newly rendered entities
+    for (const entity of renderedEntities) {
+        const hash = await computeEntityHash(entity, resourcePackPath);
+        state.renderedEntities[entity.identifier] = {
+            identifier: entity.identifier,
+            sourceFilesHash: hash,
+            renderedCommit: currentCommitSha,
+            hasShiny: hasShinyMap.get(entity.identifier) ?? false,
+        };
+    }
+    return state;
+}
+/**
+ * Save render state to a local file (to be committed with images)
+ */
+async function saveRenderStateToFile(state, outputDir) {
+    const statePath = path.join(outputDir, STATE_FILENAME);
+    await fs.writeFile(statePath, JSON.stringify(state, null, 2));
+    core.info(`Saved render state to ${statePath}`);
+    return statePath;
+}
+
+
+/***/ }),
+
 /***/ 2040:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -127730,6 +128062,7 @@ const git_1 = __nccwpck_require__(71243);
 const threejs_renderer_1 = __nccwpck_require__(65802);
 const animation_parser_1 = __nccwpck_require__(69609);
 const gif_encoder_1 = __nccwpck_require__(67248);
+const render_state_1 = __nccwpck_require__(92651);
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
     return await Promise.resolve().then(() => __importStar(__nccwpck_require__(15101)));
@@ -127775,7 +128108,7 @@ async function findChromePath() {
     catch { }
     throw new Error('Chrome/Chromium not found. Please ensure Google Chrome or Chromium is installed.');
 }
-async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha) {
+async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha, incrementalContext) {
     const toSafeFilename = (name) => {
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
@@ -127903,6 +128236,17 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
         // Render animation GIFs for changed animations
         const animationUrls = await renderChangedAnimations(prEntities, resourcePackPath, tempDir, browser);
+        // Build hasShiny map for state tracking
+        const hasShinyMap = new Map();
+        for (const entity of prEntities) {
+            hasShinyMap.set(entity.identifier, (0, blockbench_1.hasShinyTexture)(entity));
+        }
+        // Create and save render state for incremental rendering
+        const unchangedEntities = incrementalContext?.unchangedEntities ?? [];
+        const previousState = incrementalContext?.previousState ?? null;
+        const newRenderState = await (0, render_state_1.createRenderState)(prEntities, unchangedEntities, previousState, resourcePackPath, headSha, hasShinyMap);
+        await (0, render_state_1.saveRenderStateToFile)(newRenderState, tempDir);
+        core.info(`Saved render state with ${Object.keys(newRenderState.renderedEntities).length} entities`);
         // Build metadata for fork PRs (used by workflow_run to post comment)
         const metadata = {
             prNumber: github.context.issue.number,
@@ -127910,7 +128254,7 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             headSha,
             affectedEntities: prEntities.map(e => e.identifier),
         };
-        const uploadResult = await (0, image_hosting_1.uploadImagesWithForkSupport)(tempDir, github.context.issue.number, { metadata });
+        const uploadResult = await (0, image_hosting_1.uploadImagesWithForkSupport)(tempDir, github.context.issue.number, { metadata, renderState: newRenderState });
         const publicUrls = uploadResult.imageUrls;
         core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
         if (uploadResult.isFork) {
@@ -127972,6 +128316,8 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             isForkPR: uploadResult.isFork,
             artifactName: uploadResult.artifactName,
             affectedEntities: prEntities.map(e => e.identifier),
+            isIncremental: !incrementalContext?.isFirstRun && !!incrementalContext?.previousState,
+            commitSha: headSha,
         });
         core.info('Rendering process complete.');
     }

@@ -2,11 +2,15 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as path from 'path';
 import { parseResourcePack } from './parser';
-import { getChangedFiles, findAffectedEntities } from './differ';
+import { getChangedFiles, getChangedFilesSinceCommit, findAffectedEntities } from './differ';
 import { checkout, getHeadSha } from './git';
 import { renderChanges } from './renderer';
 import { runPostMode } from './post-comment';
-import { Entity } from './types';
+import { Entity, RenderState } from './types';
+import {
+  fetchRenderState,
+  determineChangedEntities,
+} from './render-state';
 
 type ActionMode = 'render' | 'post';
 
@@ -65,45 +69,89 @@ async function run(): Promise<void> {
     }
     core.info(`Using resource pack path: ${resourcePackPath}`);
 
-    // 1. Get changed files & parse head branch
-    const changedFiles = await getChangedFiles();
-    const headEntities = await parseResourcePack(resourcePackPath);
-    const affectedHeadEntities = findAffectedEntities(headEntities, changedFiles);
+    // 1. Store HEAD SHA before any operations (needed for PR merge refs)
+    const headSha = await getHeadSha();
+    core.info(`Stored HEAD SHA: ${headSha}`);
 
-    if (affectedHeadEntities.length === 0) {
+    // 2. Fetch existing render state for incremental rendering
+    const prNumber = github.context.issue.number;
+    const previousState = await fetchRenderState(prNumber);
+
+    // 3. Get changed files - either since last render or full PR
+    let changedFilesSinceLastCommit: string[] = [];
+    if (previousState) {
+      changedFilesSinceLastCommit = await getChangedFilesSinceCommit(
+        previousState.lastProcessedCommit
+      );
+      core.info(
+        `Incremental mode: ${changedFilesSinceLastCommit.length} files changed since last render`
+      );
+    }
+
+    // 4. Get all changed files in the PR (for initial entity detection)
+    const allChangedFiles = await getChangedFiles();
+    const headEntities = await parseResourcePack(resourcePackPath);
+    const allAffectedEntities = findAffectedEntities(headEntities, allChangedFiles);
+
+    if (allAffectedEntities.length === 0) {
       core.info('No model changes detected in this pull request.');
       return;
     }
     core.info(
-      `Found ${
-        affectedHeadEntities.length
-      } affected entities on HEAD (${headRef}): ${affectedHeadEntities
+      `Found ${allAffectedEntities.length} total affected entities in PR: ${allAffectedEntities
         .map((e) => e.identifier)
         .join(', ')}`
     );
 
-    // 2. Store HEAD SHA before any checkouts (needed for PR merge refs)
-    const headSha = await getHeadSha();
-    core.info(`Stored HEAD SHA: ${headSha}`);
+    // 5. Determine which entities actually need rendering (incremental)
+    const { entitiesToRender, unchangedEntities, isFirstRun } =
+      await determineChangedEntities(
+        allAffectedEntities,
+        previousState,
+        resourcePackPath,
+        changedFilesSinceLastCommit
+      );
 
-    // 3. Checkout base branch and parse
+    if (entitiesToRender.length === 0) {
+      core.info('No entities changed since last render - nothing to do.');
+      return;
+    }
+    core.info(
+      `Will render ${entitiesToRender.length} entities: ${entitiesToRender
+        .map((e) => e.identifier)
+        .join(', ')}`
+    );
+    if (unchangedEntities.length > 0) {
+      core.info(
+        `Skipping ${unchangedEntities.length} unchanged entities: ${unchangedEntities
+          .map((e) => e.identifier)
+          .join(', ')}`
+      );
+    }
+
+    // 6. Checkout base branch and parse
     core.info(`Checking out base branch: ${baseRef}`);
     await checkout(baseRef);
     const baseEntities = await parseResourcePack(resourcePackPath);
 
-    // Filter base entities to only include those affected in the PR
-    const affectedEntityIds = affectedHeadEntities.map((e) => e.identifier);
+    // Filter base entities to only include those we're rendering
+    const entitiesToRenderIds = entitiesToRender.map((e) => e.identifier);
     const affectedBaseEntities = baseEntities.filter((e) =>
-      affectedEntityIds.includes(e.identifier)
+      entitiesToRenderIds.includes(e.identifier)
     );
 
-    // Render changes - pass base ref and head SHA for checkouts
+    // 7. Render changes - pass incremental context
     await renderChanges(
       affectedBaseEntities,
-      affectedHeadEntities,
+      entitiesToRender,
       resourcePackPath,
       baseRef,
-      headSha
+      headSha,
+      {
+        previousState,
+        unchangedEntities,
+        isFirstRun,
+      }
     );
 
     core.info('Action completed successfully.');

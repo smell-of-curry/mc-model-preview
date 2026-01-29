@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as io from '@actions/io';
 import * as fs from 'fs/promises';
 import * as github from '@actions/github';
-import { Entity, ChangedAnimation, AnimationFile } from './types';
+import { Entity, ChangedAnimation, AnimationFile, RenderState } from './types';
 import { createBBFile, hasShinyTexture, TextureVariant } from './blockbench';
 import { uploadImagesWithForkSupport, ArtifactMetadata } from './image-hosting';
 import { postComment, AnimationUrlSet } from './comment';
@@ -13,6 +13,19 @@ import { renderBBModelWithThreeJS, renderAnimationFrames, loadTextureAsDataURL }
 import { getAnimationDuration } from './animation-parser';
 import { createGifFromFrames, GIF_CONFIG, calculateFrameTimestamps } from './gif-encoder';
 import { findChangedAnimations } from './differ';
+import { createRenderState, saveRenderStateToFile } from './render-state';
+
+/**
+ * Context for incremental rendering
+ */
+export interface IncrementalContext {
+  /** Previous render state (null if first run) */
+  previousState: RenderState | null;
+  /** Entities that haven't changed since last render */
+  unchangedEntities: Entity[];
+  /** Whether this is the first run for this PR */
+  isFirstRun: boolean;
+}
 
 // Dynamic import for puppeteer-core
 async function getPuppeteer() {
@@ -67,7 +80,8 @@ export async function renderChanges(
   prEntities: Entity[],
   resourcePackPath: string,
   baseRef: string,
-  headSha: string
+  headSha: string,
+  incrementalContext?: IncrementalContext
 ): Promise<void> {
   const toSafeFilename = (name: string): string => {
     return name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -224,6 +238,27 @@ export async function renderChanges(
       browser
     );
     
+    // Build hasShiny map for state tracking
+    const hasShinyMap = new Map<string, boolean>();
+    for (const entity of prEntities) {
+      hasShinyMap.set(entity.identifier, hasShinyTexture(entity));
+    }
+    
+    // Create and save render state for incremental rendering
+    const unchangedEntities = incrementalContext?.unchangedEntities ?? [];
+    const previousState = incrementalContext?.previousState ?? null;
+    
+    const newRenderState = await createRenderState(
+      prEntities,
+      unchangedEntities,
+      previousState,
+      resourcePackPath,
+      headSha,
+      hasShinyMap
+    );
+    await saveRenderStateToFile(newRenderState, tempDir);
+    core.info(`Saved render state with ${Object.keys(newRenderState.renderedEntities).length} entities`);
+    
     // Build metadata for fork PRs (used by workflow_run to post comment)
     const metadata: ArtifactMetadata = {
       prNumber: github.context.issue.number,
@@ -232,7 +267,7 @@ export async function renderChanges(
       affectedEntities: prEntities.map(e => e.identifier),
     };
     
-    const uploadResult = await uploadImagesWithForkSupport(tempDir, github.context.issue.number, { metadata });
+    const uploadResult = await uploadImagesWithForkSupport(tempDir, github.context.issue.number, { metadata, renderState: newRenderState });
     const publicUrls = uploadResult.imageUrls;
     core.info(`Public URL map keys: ${Object.keys(publicUrls).join(', ')}`);
     
@@ -315,6 +350,8 @@ export async function renderChanges(
       isForkPR: uploadResult.isFork,
       artifactName: uploadResult.artifactName,
       affectedEntities: prEntities.map(e => e.identifier),
+      isIncremental: !incrementalContext?.isFirstRun && !!incrementalContext?.previousState,
+      commitSha: headSha,
     });
     
     core.info('Rendering process complete.');

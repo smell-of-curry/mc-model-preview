@@ -25,6 +25,10 @@ export interface CommentOptions {
   artifactName?: string;
   /** List of affected entity identifiers (for fork PR summary) */
   affectedEntities?: string[];
+  /** Whether this is an incremental render (not first run) */
+  isIncremental?: boolean;
+  /** The commit SHA that triggered this render */
+  commitSha?: string;
 }
 
 export async function postComment(
@@ -34,9 +38,20 @@ export async function postComment(
 ): Promise<void> {
   core.info('Generating PR comment...');
 
-  const { isForkPR, artifactName, affectedEntities } = options;
+  const { isForkPR, artifactName, affectedEntities, isIncremental, commitSha } = options;
   
-  let body = `## Minecraft Model Preview\n\n`;
+  // Build header with incremental context
+  let body = `## Minecraft Model Preview`;
+  if (commitSha) {
+    const shortSha = commitSha.substring(0, 7);
+    body += ` (${shortSha})`;
+  }
+  body += `\n\n`;
+  
+  // Add incremental notice if applicable
+  if (isIncremental) {
+    body += `> This comment shows only the models changed in the latest commit.\n\n`;
+  }
   
   // For fork PRs without image URLs, show a helpful message
   if (isForkPR && imageUrls.every(u => !u.base && !u.head)) {

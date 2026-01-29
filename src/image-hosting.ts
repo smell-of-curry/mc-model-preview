@@ -4,6 +4,7 @@ import * as github from '@actions/github';
 import * as artifact from '@actions/artifact';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { RenderState } from './types';
 
 const IMAGE_BRANCH = 'mc-model-preview-images';
 
@@ -52,10 +53,10 @@ async function uploadImagesAsArtifact(
     core.info(`Saved metadata to ${metadataPath}`);
   }
   
-  // Find all image files and metadata (exclude .bbmodel - they contain colons which are invalid for artifacts)
+  // Find all image files, metadata, and render state (exclude .bbmodel - they contain colons which are invalid for artifacts)
   const found = await exec.getExecOutput('bash', [
     '-lc',
-    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'metadata.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
+    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'metadata.json' -o -name 'render-state.json' \\) -print0 | xargs -0 -I {} echo "{}" | sort | cat`,
   ]);
   
   const files = found.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -79,18 +80,19 @@ async function uploadImagesAsArtifact(
 
 /**
  * Upload images to the orphan branch (for non-fork PRs)
+ * Preserves existing images for incremental rendering
  */
 async function uploadImagesToBranch(
   imageDir: string,
   prNumber: number
 ): Promise<Record<string, string>> {
-  core.info('Uploading images to orphan branch...');
+  core.info('Uploading images to orphan branch (incremental mode)...');
 
   const repo = `${github.context.repo.owner}/${github.context.repo.repo}`;
   const token = core.getInput('github-token');
   // Use token-authenticated URL for push access
   const repoUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
-  const commitMsg = `Add images for PR #${prNumber}`;
+  const commitMsg = `Update images for PR #${prNumber}`;
   const remoteName = `origin-${IMAGE_BRANCH}`;
 
   // Ensure remote exists (ignore if already added)
@@ -105,14 +107,18 @@ async function uploadImagesToBranch(
     IMAGE_BRANCH,
   ]);
 
+  const prFolder = `pr-${prNumber}`;
+  
   if (lsRemote.stdout && lsRemote.stdout.trim().length > 0) {
     // Remote branch exists: create local tracking branch
     await exec.exec('git', ['checkout', '-B', IMAGE_BRANCH, `${remoteName}/${IMAGE_BRANCH}`]);
+    core.info(`Checked out existing ${IMAGE_BRANCH} branch - preserving existing images`);
   } else {
     // Create orphan branch for images
     await exec.exec('git', ['checkout', '--orphan', IMAGE_BRANCH]);
     // Remove all files from index/worktree before adding images
     try { await exec.exec('git', ['rm', '-rf', '.']); } catch {}
+    core.info(`Created new orphan branch ${IMAGE_BRANCH}`);
   }
 
   // Configure git user
@@ -123,34 +129,60 @@ async function uploadImagesToBranch(
     'github-actions[bot]@users.noreply.github.com',
   ]);
 
-  // Copy images into a dedicated folder per PR to avoid collisions
-  const prFolder = `pr-${prNumber}`;
+  // Ensure PR folder exists (preserves existing files)
   await exec.exec('mkdir', ['-p', prFolder]);
-  await exec.exec('cp', ['-r', `${imageDir}/.`, prFolder]);
+  
+  // Copy new/updated images into the PR folder (preserves existing files)
+  // Using cp without -r on individual files to merge rather than replace
+  const newFiles = await exec.getExecOutput('bash', [
+    '-lc',
+    `find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'render-state.json' \\) -print`,
+  ]);
+  
+  const filesToCopy = newFiles.stdout.split('\n').map(s => s.trim()).filter(Boolean);
+  core.info(`Copying ${filesToCopy.length} new/updated files to ${prFolder}`);
+  
+  for (const file of filesToCopy) {
+    const filename = path.basename(file);
+    await exec.exec('cp', [file, `${prFolder}/${filename}`]);
+  }
 
   // Only stage the PR folder
   await exec.exec('git', ['add', prFolder]);
-  // For debugging, list what we're about to commit
-  await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git ls-files -s ${prFolder} | cat`]);
-  await exec.exec('git', ['commit', '-m', commitMsg]);
-  await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
+  
+  // Check if there are changes to commit
+  const status = await exec.getExecOutput('git', ['status', '--porcelain']);
+  if (!status.stdout.trim()) {
+    core.info('No changes to commit - images may be identical to previous render');
+    // Still need to get commit SHA for URL building
+  } else {
+    // For debugging, list what we're about to commit
+    await exec.exec('bash', ['-lc', `echo 'Files staged for commit:' && git diff --cached --name-only | cat`]);
+    await exec.exec('git', ['commit', '-m', commitMsg]);
+    await exec.exec('git', ['push', '-u', remoteName, IMAGE_BRANCH]);
+  }
 
   const commitSha = await exec.getExecOutput('git', ['rev-parse', 'HEAD']);
   
+  // Build URLs for ALL images in the PR folder (including previously uploaded ones)
   const imageUrls: Record<string, string> = {};
-  // Recursively discover PNGs and GIFs to support nested outputs
-  const found = await exec.getExecOutput('bash', [
+  
+  // Get all images from the PR folder on the branch (not just newly uploaded)
+  const allPrImages = await exec.getExecOutput('bash', [
     '-lc',
-    `set -o pipefail; find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' \\) -printf '%p\n' | sort | cat`,
+    `find '${prFolder}' -type f \\( -name '*.png' -o -name '*.gif' \\) -print | sort`,
   ]);
-  core.info(`Uploader discovered images under ${imageDir}:\n${found.stdout}`);
-
-  for (const absPath of found.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
-    const relPath = path.relative(imageDir, absPath).replace(/\\/g, '/');
-    const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${prFolder}/${relPath}`;
-    imageUrls[absPath] = publicUrl;
+  
+  for (const branchPath of allPrImages.stdout.split('\n').map(s => s.trim()).filter(Boolean)) {
+    const filename = path.basename(branchPath);
+    const localPath = path.join(imageDir, filename);
+    const publicUrl = `https://raw.githubusercontent.com/${repo}/${commitSha.stdout.trim()}/${branchPath}`;
+    // Map both the local path (for newly rendered) and branch path
+    imageUrls[localPath] = publicUrl;
+    imageUrls[branchPath] = publicUrl;
   }
-
+  
+  core.info(`Built URLs for ${Object.keys(imageUrls).length / 2} images (including existing)`);
   core.info('Image upload complete.');
   return imageUrls;
 }
@@ -167,6 +199,8 @@ export interface UploadResult {
 export interface UploadOptions {
   /** Metadata to save with the artifact (for workflow_run to use) */
   metadata?: ArtifactMetadata;
+  /** Render state to save alongside images (for incremental rendering) */
+  renderState?: RenderState;
 }
 
 // Returns a map of local file paths to their public URLs

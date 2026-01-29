@@ -1,4 +1,5 @@
 import * as core from '@actions/core';
+import * as exec from '@actions/exec';
 import * as github from '@actions/github';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -23,6 +24,35 @@ export async function getChangedFiles(): Promise<string[]> {
   });
 
   return files.map((file) => file.filename);
+}
+
+/**
+ * Get files changed since a specific commit
+ * Uses git diff to find files changed between the given commit and HEAD
+ * This is used for incremental rendering to only re-render what changed
+ */
+export async function getChangedFilesSinceCommit(
+  baseSha: string
+): Promise<string[]> {
+  try {
+    const result = await exec.getExecOutput(
+      'git',
+      ['diff', '--name-only', `${baseSha}...HEAD`],
+      { silent: true }
+    );
+    
+    const files = result.stdout
+      .split('\n')
+      .map(f => f.trim())
+      .filter(Boolean);
+    
+    core.info(`Found ${files.length} files changed since commit ${baseSha.substring(0, 7)}`);
+    return files;
+  } catch (error) {
+    core.warning(`Failed to get changed files since ${baseSha}: ${error}`);
+    // Fall back to getting all PR files
+    return getChangedFiles();
+  }
 }
 
 export function findAffectedEntities(
