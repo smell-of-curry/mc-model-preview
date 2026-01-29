@@ -256,8 +256,13 @@ export async function renderChanges(
       headSha,
       hasShinyMap
     );
-    await saveRenderStateToFile(newRenderState, tempDir);
+    const stateFilePath = await saveRenderStateToFile(newRenderState, tempDir);
     core.info(`Saved render state with ${Object.keys(newRenderState.renderedEntities).length} entities`);
+    
+    // List temp directory contents to verify state file exists
+    const tempContents = await fs.readdir(tempDir);
+    const stateFileExists = tempContents.includes('render-state.json');
+    core.info(`Temp dir has ${tempContents.length} files, render-state.json exists: ${stateFileExists}`);
     
     // Build metadata for fork PRs (used by workflow_run to post comment)
     const metadata: ArtifactMetadata = {

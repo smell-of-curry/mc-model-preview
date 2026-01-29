@@ -245,7 +245,16 @@ export async function saveRenderStateToFile(
   outputDir: string
 ): Promise<string> {
   const statePath = path.join(outputDir, STATE_FILENAME);
-  await fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  core.info(`Saved render state to ${statePath}`);
+  const content = JSON.stringify(state, null, 2);
+  await fs.writeFile(statePath, content);
+  
+  // Verify the file was written
+  try {
+    const stat = await fs.stat(statePath);
+    core.info(`Saved render state to ${statePath} (${stat.size} bytes)`);
+  } catch (error) {
+    core.warning(`Failed to verify render state file: ${error}`);
+  }
+  
   return statePath;
 }

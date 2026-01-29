@@ -127009,11 +127009,12 @@ async function uploadImagesToBranch(imageDir, prNumber) {
     // Copy new/updated images into the PR folder (preserves existing files)
     // Using cp without -r on individual files to merge rather than replace
     const newFiles = await exec.getExecOutput('bash', [
-        '-lc',
-        `find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'render-state.json' \\) -print`,
+        '-c',
+        `find "${imageDir}" -type f \\( -name "*.png" -o -name "*.gif" -o -name "render-state.json" \\)`,
     ]);
     const filesToCopy = newFiles.stdout.split('\n').map(s => s.trim()).filter(Boolean);
     core.info(`Copying ${filesToCopy.length} new/updated files to ${prFolder}`);
+    core.info(`Files to copy: ${filesToCopy.join(', ')}`);
     for (const file of filesToCopy) {
         const filename = path.basename(file);
         await exec.exec('cp', [file, `${prFolder}/${filename}`]);
@@ -128001,8 +128002,16 @@ async function createRenderState(renderedEntities, unchangedEntities, previousSt
  */
 async function saveRenderStateToFile(state, outputDir) {
     const statePath = path.join(outputDir, STATE_FILENAME);
-    await fs.writeFile(statePath, JSON.stringify(state, null, 2));
-    core.info(`Saved render state to ${statePath}`);
+    const content = JSON.stringify(state, null, 2);
+    await fs.writeFile(statePath, content);
+    // Verify the file was written
+    try {
+        const stat = await fs.stat(statePath);
+        core.info(`Saved render state to ${statePath} (${stat.size} bytes)`);
+    }
+    catch (error) {
+        core.warning(`Failed to verify render state file: ${error}`);
+    }
     return statePath;
 }
 
@@ -128245,8 +128254,12 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         const unchangedEntities = incrementalContext?.unchangedEntities ?? [];
         const previousState = incrementalContext?.previousState ?? null;
         const newRenderState = await (0, render_state_1.createRenderState)(prEntities, unchangedEntities, previousState, resourcePackPath, headSha, hasShinyMap);
-        await (0, render_state_1.saveRenderStateToFile)(newRenderState, tempDir);
+        const stateFilePath = await (0, render_state_1.saveRenderStateToFile)(newRenderState, tempDir);
         core.info(`Saved render state with ${Object.keys(newRenderState.renderedEntities).length} entities`);
+        // List temp directory contents to verify state file exists
+        const tempContents = await fs.readdir(tempDir);
+        const stateFileExists = tempContents.includes('render-state.json');
+        core.info(`Temp dir has ${tempContents.length} files, render-state.json exists: ${stateFileExists}`);
         // Build metadata for fork PRs (used by workflow_run to post comment)
         const metadata = {
             prNumber: github.context.issue.number,

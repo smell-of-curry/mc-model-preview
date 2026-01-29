@@ -135,12 +135,13 @@ async function uploadImagesToBranch(
   // Copy new/updated images into the PR folder (preserves existing files)
   // Using cp without -r on individual files to merge rather than replace
   const newFiles = await exec.getExecOutput('bash', [
-    '-lc',
-    `find '${imageDir}' -type f \\( -name '*.png' -o -name '*.gif' -o -name 'render-state.json' \\) -print`,
+    '-c',
+    `find "${imageDir}" -type f \\( -name "*.png" -o -name "*.gif" -o -name "render-state.json" \\)`,
   ]);
   
   const filesToCopy = newFiles.stdout.split('\n').map(s => s.trim()).filter(Boolean);
   core.info(`Copying ${filesToCopy.length} new/updated files to ${prFolder}`);
+  core.info(`Files to copy: ${filesToCopy.join(', ')}`);
   
   for (const file of filesToCopy) {
     const filename = path.basename(file);
