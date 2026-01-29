@@ -105,10 +105,55 @@ export interface RenderState {
 export interface EntityRenderState {
   /** The entity identifier (e.g., "pokemon:pikachu") */
   identifier: string;
-  /** Hash of all source files (entity, geometry, texture, animation) */
-  sourceFilesHash: string;
   /** The commit SHA when this entity was last rendered */
   renderedCommit: string;
   /** Whether the entity has a shiny variant */
   hasShiny: boolean;
+  
+  // Granular file hashes for fine-grained change detection
+  /** Hash of the entity definition file */
+  entityFileHash: string;
+  /** Hash of geometry files (filepath -> hash) */
+  geometryHashes: Record<string, string>;
+  /** Hash of the default texture file */
+  defaultTextureHash: string;
+  /** Hash of the shiny texture file (empty string if no shiny) */
+  shinyTextureHash: string;
+  /** Hash of animation files (animation identifier -> file hash) */
+  animationHashes: Record<string, string>;
+  /** Hash of material files (filepath -> hash) */
+  materialHashes: Record<string, string>;
+  
+  // Legacy field for backward compatibility (optional)
+  /** @deprecated Use granular hashes instead */
+  sourceFilesHash?: string;
+}
+
+/**
+ * Information about what needs to be rendered for an entity
+ * Used for granular incremental rendering
+ */
+export interface EntityChangeInfo {
+  /** The entity to render */
+  entity: Entity;
+  /** Whether to render the default (non-shiny) model */
+  renderDefault: boolean;
+  /** Whether to render the shiny model */
+  renderShiny: boolean;
+  /** List of animation identifiers that need to be rendered */
+  animationsToRender: string[];
+  /** Whether this is a new entity (not present on base branch) */
+  isNew: boolean;
+}
+
+/**
+ * Granular hashes for an entity's source files
+ */
+export interface GranularHashes {
+  entityFileHash: string;
+  geometryHashes: Record<string, string>;
+  defaultTextureHash: string;
+  shinyTextureHash: string;
+  animationHashes: Record<string, string>;
+  materialHashes: Record<string, string>;
 }

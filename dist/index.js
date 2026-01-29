@@ -127217,29 +127217,42 @@ async function run() {
         core.info(`Found ${allAffectedEntities.length} total affected entities in PR: ${allAffectedEntities
             .map((e) => e.identifier)
             .join(', ')}`);
-        // 5. Determine which entities actually need rendering (incremental)
-        const { entitiesToRender, unchangedEntities, isFirstRun } = await (0, render_state_1.determineChangedEntities)(allAffectedEntities, previousState, resourcePackPath, changedFilesSinceLastCommit);
+        // 5. Checkout base branch to get base entity list (needed for new entity detection)
+        core.info(`Checking out base branch: ${baseRef}`);
+        await (0, git_1.checkout)(baseRef);
+        const baseEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
+        const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
+        // Checkout back to HEAD to determine changes
+        await (0, git_1.checkout)(headSha);
+        // 6. Determine which entities actually need rendering (granular incremental)
+        const { entitiesToRender, unchangedEntities, isFirstRun } = await (0, render_state_1.determineChangedEntities)(allAffectedEntities, previousState, resourcePackPath, changedFilesSinceLastCommit, baseEntityIds);
         if (entitiesToRender.length === 0) {
             core.info('No entities changed since last render - nothing to do.');
             return;
         }
-        core.info(`Will render ${entitiesToRender.length} entities: ${entitiesToRender
-            .map((e) => e.identifier)
-            .join(', ')}`);
+        // Log what will be rendered with granular details
+        core.info(`Will render ${entitiesToRender.length} entities with the following changes:`);
+        for (const changeInfo of entitiesToRender) {
+            const parts = [];
+            if (changeInfo.renderDefault)
+                parts.push('default model');
+            if (changeInfo.renderShiny)
+                parts.push('shiny model');
+            if (changeInfo.animationsToRender.length > 0) {
+                parts.push(`${changeInfo.animationsToRender.length} animation(s)`);
+            }
+            core.info(`  ${changeInfo.entity.identifier}: ${parts.join(', ')}`);
+        }
         if (unchangedEntities.length > 0) {
             core.info(`Skipping ${unchangedEntities.length} unchanged entities: ${unchangedEntities
                 .map((e) => e.identifier)
                 .join(', ')}`);
         }
-        // 6. Checkout base branch and parse
+        // 7. Checkout base branch for base model generation
         core.info(`Checking out base branch: ${baseRef}`);
         await (0, git_1.checkout)(baseRef);
-        const baseEntities = await (0, parser_1.parseResourcePack)(resourcePackPath);
-        // Filter base entities to only include those we're rendering
-        const entitiesToRenderIds = entitiesToRender.map((e) => e.identifier);
-        const affectedBaseEntities = baseEntities.filter((e) => entitiesToRenderIds.includes(e.identifier));
-        // 7. Render changes - pass incremental context
-        await (0, renderer_1.renderChanges)(affectedBaseEntities, entitiesToRender, resourcePackPath, baseRef, headSha, {
+        // 8. Render changes - pass EntityChangeInfo[] with incremental context
+        await (0, renderer_1.renderChanges)(entitiesToRender, resourcePackPath, baseRef, headSha, {
             previousState,
             unchangedEntities,
             isFirstRun,
@@ -127811,6 +127824,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.fetchRenderState = fetchRenderState;
 exports.isCommitAncestor = isCommitAncestor;
 exports.computeEntityHash = computeEntityHash;
+exports.computeGranularHashes = computeGranularHashes;
+exports.getAllAnimationIds = getAllAnimationIds;
 exports.determineChangedEntities = determineChangedEntities;
 exports.createRenderState = createRenderState;
 exports.saveRenderStateToFile = saveRenderStateToFile;
@@ -127970,6 +127985,7 @@ async function isCommitAncestor(commitSha) {
 /**
  * Compute a hash of all source files for an entity
  * This includes: entity file, geometry files, texture files, animation files, material files
+ * @deprecated Use computeGranularHashes for fine-grained change detection
  */
 async function computeEntityHash(entity, resourcePackPath) {
     const hash = crypto.createHash('sha256');
@@ -127999,15 +128015,255 @@ async function computeEntityHash(entity, resourcePackPath) {
     return hash.digest('hex');
 }
 /**
- * Determine which entities have changed since the last render
- * Returns entities that need to be re-rendered
+ * Compute a hash for a single file
  */
-async function determineChangedEntities(currentEntities, previousState, resourcePackPath, changedFilesSinceLastCommit) {
-    // First run - render everything
+async function computeFileHash(filePath, resourcePackPath) {
+    try {
+        let fullPath = path.join(resourcePackPath, filePath);
+        // Handle paths without extension
+        if (!filePath.endsWith('.png') && !filePath.endsWith('.jpg') && filePath.includes('textures/')) {
+            fullPath = path.join(resourcePackPath, filePath + '.png');
+        }
+        const content = await fs.readFile(fullPath);
+        const hash = crypto.createHash('sha256');
+        hash.update(filePath);
+        hash.update(content);
+        return hash.digest('hex');
+    }
+    catch (error) {
+        return `MISSING:${filePath}`;
+    }
+}
+/**
+ * Get the best texture key for the default (non-shiny) variant
+ */
+function getDefaultTextureKey(textureMap) {
+    const keys = Object.keys(textureMap);
+    if (keys.includes('default'))
+        return 'default';
+    const maleDefault = keys.find(k => k === 'male_default');
+    if (maleDefault)
+        return maleDefault;
+    const anyNonShiny = keys.find(k => !k.startsWith('shiny_') && k !== 'evo_aura');
+    return anyNonShiny || null;
+}
+/**
+ * Get the best texture key for the shiny variant
+ */
+function getShinyTextureKey(textureMap) {
+    const keys = Object.keys(textureMap);
+    if (keys.includes('shiny_default'))
+        return 'shiny_default';
+    const shinyMaleDefault = keys.find(k => k === 'shiny_male_default');
+    if (shinyMaleDefault)
+        return shinyMaleDefault;
+    const anyShiny = keys.find(k => k.startsWith('shiny_'));
+    return anyShiny || null;
+}
+/**
+ * Compute granular hashes for an entity's source files
+ * This allows fine-grained change detection to determine exactly what needs to be re-rendered
+ */
+async function computeGranularHashes(entity, resourcePackPath) {
+    // Hash the entity definition file
+    const entityFileHash = await computeFileHash(entity.entityFilePath, resourcePackPath);
+    // Hash each geometry file
+    const geometryHashes = {};
+    for (const geoFile of entity.geometryFiles) {
+        geometryHashes[geoFile] = await computeFileHash(geoFile, resourcePackPath);
+    }
+    // Hash the default texture
+    const defaultTextureKey = getDefaultTextureKey(entity.textureMap);
+    let defaultTextureHash = '';
+    if (defaultTextureKey && entity.textureMap[defaultTextureKey]) {
+        defaultTextureHash = await computeFileHash(entity.textureMap[defaultTextureKey], resourcePackPath);
+    }
+    // Hash the shiny texture
+    const shinyTextureKey = getShinyTextureKey(entity.textureMap);
+    let shinyTextureHash = '';
+    if (shinyTextureKey && entity.textureMap[shinyTextureKey]) {
+        shinyTextureHash = await computeFileHash(entity.textureMap[shinyTextureKey], resourcePackPath);
+    }
+    // Hash each animation file, keyed by animation identifier
+    // We need to read animation files to get the animation identifiers inside them
+    const animationHashes = {};
+    for (const animFile of entity.animationFiles) {
+        try {
+            const fullPath = path.join(resourcePackPath, animFile);
+            const content = await fs.readFile(fullPath, 'utf-8');
+            const animJson = JSON.parse(content);
+            if (animJson.animations) {
+                // Compute a hash for each animation identifier in this file
+                const fileHash = crypto.createHash('sha256');
+                fileHash.update(animFile);
+                fileHash.update(content);
+                const hash = fileHash.digest('hex');
+                for (const animId of Object.keys(animJson.animations)) {
+                    // All animations in the same file share the same hash
+                    // (since we need to re-render if any part of the file changes)
+                    animationHashes[animId] = hash;
+                }
+            }
+        }
+        catch (error) {
+            // If we can't read the file, mark all known animations as missing
+            core.warning(`Could not read animation file ${animFile}: ${error}`);
+        }
+    }
+    // Hash each material file
+    const materialHashes = {};
+    for (const matFile of entity.materialFiles) {
+        materialHashes[matFile] = await computeFileHash(matFile, resourcePackPath);
+    }
+    return {
+        entityFileHash,
+        geometryHashes,
+        defaultTextureHash,
+        shinyTextureHash,
+        animationHashes,
+        materialHashes,
+    };
+}
+/**
+ * Check if the entity render state uses the legacy format (single hash)
+ */
+function isLegacyState(state) {
+    return !state.entityFileHash || state.entityFileHash === undefined;
+}
+/**
+ * Get all animation identifiers for an entity
+ */
+async function getAllAnimationIds(entity, resourcePackPath) {
+    const animIds = [];
+    const entityName = entity.identifier.split(':').pop() || entity.identifier;
+    for (const animFile of entity.animationFiles) {
+        try {
+            const fullPath = path.join(resourcePackPath, animFile);
+            const content = await fs.readFile(fullPath, 'utf-8');
+            const animJson = JSON.parse(content);
+            if (animJson.animations) {
+                for (const animId of Object.keys(animJson.animations)) {
+                    // Only include animations that match this entity's name pattern
+                    if (animId.includes(`.${entityName}.`)) {
+                        animIds.push(animId);
+                    }
+                }
+            }
+        }
+        catch (error) {
+            core.warning(`Could not read animation file ${animFile}: ${error}`);
+        }
+    }
+    return animIds;
+}
+/**
+ * Determine what needs to be rendered for an entity based on granular change detection
+ */
+async function determineEntityRenderNeeds(entity, previousState, currentHashes, resourcePackPath) {
+    const hasShiny = !!currentHashes.shinyTextureHash && currentHashes.shinyTextureHash !== '';
+    // Entity file changed -> render everything (references may have changed)
+    if (currentHashes.entityFileHash !== previousState.entityFileHash) {
+        core.info(`  Entity file changed - will render all`);
+        const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+        return {
+            entity,
+            renderDefault: true,
+            renderShiny: hasShiny,
+            animationsToRender: allAnimIds,
+            isNew: false,
+        };
+    }
+    // Check if geometry changed
+    const geometryChanged = Object.keys(currentHashes.geometryHashes).some(file => {
+        const prevHash = previousState.geometryHashes?.[file];
+        return prevHash !== currentHashes.geometryHashes[file];
+    }) || Object.keys(previousState.geometryHashes || {}).some(file => {
+        return !currentHashes.geometryHashes[file];
+    });
+    if (geometryChanged) {
+        core.info(`  Geometry changed - will render models and all animations`);
+        const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+        return {
+            entity,
+            renderDefault: true,
+            renderShiny: hasShiny,
+            animationsToRender: allAnimIds,
+            isNew: false,
+        };
+    }
+    // Start with nothing to render
+    const info = {
+        entity,
+        renderDefault: false,
+        renderShiny: false,
+        animationsToRender: [],
+        isNew: false,
+    };
+    // Default texture changed -> only render default model
+    if (currentHashes.defaultTextureHash !== previousState.defaultTextureHash) {
+        core.info(`  Default texture changed - will render default model`);
+        info.renderDefault = true;
+    }
+    // Shiny texture changed -> only render shiny model
+    if (hasShiny && currentHashes.shinyTextureHash !== previousState.shinyTextureHash) {
+        core.info(`  Shiny texture changed - will render shiny model`);
+        info.renderShiny = true;
+    }
+    // Check individual animations
+    const currentAnimIds = new Set(Object.keys(currentHashes.animationHashes));
+    const prevAnimIds = new Set(Object.keys(previousState.animationHashes || {}));
+    // Find changed animations
+    for (const animId of currentAnimIds) {
+        const prevHash = previousState.animationHashes?.[animId];
+        if (prevHash !== currentHashes.animationHashes[animId]) {
+            core.info(`  Animation ${animId} changed - will render`);
+            info.animationsToRender.push(animId);
+        }
+    }
+    // Find new animations (in current but not in previous)
+    for (const animId of currentAnimIds) {
+        if (!prevAnimIds.has(animId) && !info.animationsToRender.includes(animId)) {
+            core.info(`  Animation ${animId} is new - will render`);
+            info.animationsToRender.push(animId);
+        }
+    }
+    // Check if materials changed -> render models (not animations)
+    const materialChanged = Object.keys(currentHashes.materialHashes).some(file => {
+        const prevHash = previousState.materialHashes?.[file];
+        return prevHash !== currentHashes.materialHashes[file];
+    }) || Object.keys(previousState.materialHashes || {}).some(file => {
+        return !currentHashes.materialHashes[file];
+    });
+    if (materialChanged) {
+        core.info(`  Material changed - will render models`);
+        info.renderDefault = true;
+        info.renderShiny = hasShiny;
+    }
+    return info;
+}
+/**
+ * Determine which entities have changed since the last render
+ * Returns detailed info about what needs to be re-rendered for each entity
+ */
+async function determineChangedEntities(currentEntities, previousState, resourcePackPath, changedFilesSinceLastCommit, baseEntityIds) {
+    // First run - render everything for all entities
     if (!previousState) {
         core.info('First run detected - will render all affected entities');
+        const entitiesToRender = [];
+        for (const entity of currentEntities) {
+            const hasShiny = !!getShinyTextureKey(entity.textureMap);
+            const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+            const isNew = !baseEntityIds.has(entity.identifier);
+            entitiesToRender.push({
+                entity,
+                renderDefault: true,
+                renderShiny: hasShiny,
+                animationsToRender: allAnimIds,
+                isNew,
+            });
+        }
         return {
-            entitiesToRender: currentEntities,
+            entitiesToRender,
             unchangedEntities: [],
             isFirstRun: true,
         };
@@ -128017,8 +128273,21 @@ async function determineChangedEntities(currentEntities, previousState, resource
     if (!isAncestor) {
         core.info('Previous commit is not an ancestor of current HEAD (force push or commit not found)');
         core.info('Invalidating previous state - will render all affected entities');
+        const entitiesToRender = [];
+        for (const entity of currentEntities) {
+            const hasShiny = !!getShinyTextureKey(entity.textureMap);
+            const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+            const isNew = !baseEntityIds.has(entity.identifier);
+            entitiesToRender.push({
+                entity,
+                renderDefault: true,
+                renderShiny: hasShiny,
+                animationsToRender: allAnimIds,
+                isNew,
+            });
+        }
         return {
-            entitiesToRender: currentEntities,
+            entitiesToRender,
             unchangedEntities: [],
             isFirstRun: false,
         };
@@ -128029,10 +128298,19 @@ async function determineChangedEntities(currentEntities, previousState, resource
     const changedFilesSet = new Set(changedFilesSinceLastCommit);
     for (const entity of currentEntities) {
         const previousEntityState = previousState.renderedEntities[entity.identifier];
-        // New entity - needs rendering
+        const isNew = !baseEntityIds.has(entity.identifier);
+        // New entity in the render state - needs full rendering
         if (!previousEntityState) {
-            core.info(`Entity ${entity.identifier} is new - will render`);
-            entitiesToRender.push(entity);
+            core.info(`Entity ${entity.identifier} is new to render state - will render all`);
+            const hasShiny = !!getShinyTextureKey(entity.textureMap);
+            const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+            entitiesToRender.push({
+                entity,
+                renderDefault: true,
+                renderShiny: hasShiny,
+                animationsToRender: allAnimIds,
+                isNew,
+            });
             continue;
         }
         // Check if any of this entity's source files changed
@@ -128049,17 +128327,44 @@ async function determineChangedEntities(currentEntities, previousState, resource
             unchangedEntities.push(entity);
             continue;
         }
-        // Files changed - compute hash to see if content actually differs
-        const currentHash = await computeEntityHash(entity, resourcePackPath);
-        if (currentHash === previousEntityState.sourceFilesHash) {
-            core.info(`Entity ${entity.identifier} hash unchanged - skipping`);
+        // Compute granular hashes for detailed change detection
+        const currentHashes = await computeGranularHashes(entity, resourcePackPath);
+        // Check if this is a legacy state (only has sourceFilesHash)
+        if (isLegacyState(previousEntityState)) {
+            core.info(`Entity ${entity.identifier} has legacy state - will render all (one-time migration)`);
+            const hasShiny = !!getShinyTextureKey(entity.textureMap);
+            const allAnimIds = await getAllAnimationIds(entity, resourcePackPath);
+            entitiesToRender.push({
+                entity,
+                renderDefault: true,
+                renderShiny: hasShiny,
+                animationsToRender: allAnimIds,
+                isNew,
+            });
+            continue;
+        }
+        // Determine what specifically needs to be rendered
+        core.info(`Entity ${entity.identifier} has changed files - determining render needs:`);
+        const changeInfo = await determineEntityRenderNeeds(entity, previousEntityState, currentHashes, resourcePackPath);
+        changeInfo.isNew = isNew;
+        // Check if anything actually needs rendering
+        if (!changeInfo.renderDefault && !changeInfo.renderShiny && changeInfo.animationsToRender.length === 0) {
+            core.info(`Entity ${entity.identifier} - no actual changes detected, skipping`);
             unchangedEntities.push(entity);
             continue;
         }
-        core.info(`Entity ${entity.identifier} has changed (hash differs) - will render`);
-        entitiesToRender.push(entity);
+        const renderSummary = [];
+        if (changeInfo.renderDefault)
+            renderSummary.push('default');
+        if (changeInfo.renderShiny)
+            renderSummary.push('shiny');
+        if (changeInfo.animationsToRender.length > 0) {
+            renderSummary.push(`${changeInfo.animationsToRender.length} animation(s)`);
+        }
+        core.info(`Entity ${entity.identifier} will render: ${renderSummary.join(', ')}`);
+        entitiesToRender.push(changeInfo);
     }
-    core.info(`Incremental render: ${entitiesToRender.length} entities to render, ${unchangedEntities.length} unchanged`);
+    core.info(`Granular incremental render: ${entitiesToRender.length} entities need rendering, ${unchangedEntities.length} unchanged`);
     return {
         entitiesToRender,
         unchangedEntities,
@@ -128068,6 +128373,7 @@ async function determineChangedEntities(currentEntities, previousState, resource
 }
 /**
  * Create a new render state from the current render results
+ * Uses granular hashes for fine-grained change detection
  */
 async function createRenderState(renderedEntities, unchangedEntities, previousState, resourcePackPath, currentCommitSha, hasShinyMap) {
     const state = {
@@ -128084,14 +128390,21 @@ async function createRenderState(renderedEntities, unchangedEntities, previousSt
             }
         }
     }
-    // Add newly rendered entities
+    // Add newly rendered entities with granular hashes
     for (const entity of renderedEntities) {
-        const hash = await computeEntityHash(entity, resourcePackPath);
+        const granularHashes = await computeGranularHashes(entity, resourcePackPath);
+        const hasShiny = hasShinyMap.get(entity.identifier) ?? false;
         state.renderedEntities[entity.identifier] = {
             identifier: entity.identifier,
-            sourceFilesHash: hash,
             renderedCommit: currentCommitSha,
-            hasShiny: hasShinyMap.get(entity.identifier) ?? false,
+            hasShiny,
+            // Granular hashes for fine-grained change detection
+            entityFileHash: granularHashes.entityFileHash,
+            geometryHashes: granularHashes.geometryHashes,
+            defaultTextureHash: granularHashes.defaultTextureHash,
+            shinyTextureHash: granularHashes.shinyTextureHash,
+            animationHashes: granularHashes.animationHashes,
+            materialHashes: granularHashes.materialHashes,
         };
     }
     return state;
@@ -128216,11 +128529,23 @@ async function findChromePath() {
     catch { }
     throw new Error('Chrome/Chromium not found. Please ensure Google Chrome or Chromium is installed.');
 }
-async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef, headSha, incrementalContext) {
+async function renderChanges(entitiesToRender, resourcePackPath, baseRef, headSha, incrementalContext) {
     const toSafeFilename = (name) => {
         return name.replace(/[^a-zA-Z0-9._-]/g, '_');
     };
     core.info('Starting rendering process...');
+    // Log what we're going to render
+    for (const changeInfo of entitiesToRender) {
+        const renderParts = [];
+        if (changeInfo.renderDefault)
+            renderParts.push('default');
+        if (changeInfo.renderShiny)
+            renderParts.push('shiny');
+        if (changeInfo.animationsToRender.length > 0) {
+            renderParts.push(`${changeInfo.animationsToRender.length} animation(s)`);
+        }
+        core.info(`Will render for ${changeInfo.entity.identifier}: ${renderParts.join(', ') || 'nothing'}`);
+    }
     // Find Chrome/Chromium
     const chromePath = await findChromePath();
     core.info(`Using Chrome at: ${chromePath}`);
@@ -128260,37 +128585,47 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
     await io.mkdirP(tempDir);
     core.info(`Created temporary directory for rendering at ${tempDir}`);
     try {
+        // Build list of entities that need base (before) models
+        const entitiesNeedingBaseDefault = entitiesToRender.filter(e => e.renderDefault && !e.isNew);
+        const entitiesNeedingBaseShiny = entitiesToRender.filter(e => e.renderShiny && !e.isNew);
         // Generate "before" models (already on base branch from main.ts)
-        core.info(`Generating base models (on ${baseRef})...`);
-        for (const entity of baseEntities) {
-            // Generate normal variant
-            try {
-                const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'normal');
-                const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
-                await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-                core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
-            }
-            catch (error) {
-                core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
-            }
-            // Generate shiny variant if available
-            if ((0, blockbench_1.hasShinyTexture)(entity)) {
+        if (entitiesNeedingBaseDefault.length > 0 || entitiesNeedingBaseShiny.length > 0) {
+            core.info(`Generating base models (on ${baseRef})...`);
+            for (const changeInfo of entitiesNeedingBaseDefault) {
+                const entity = changeInfo.entity;
                 try {
-                    const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'shiny');
-                    const modelPath = path.join(tempDir, `${entity.identifier}.base.shiny.bbmodel`);
+                    const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'normal');
+                    const modelPath = path.join(tempDir, `${entity.identifier}.base.bbmodel`);
                     await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
-                    core.info(`Generated base shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+                    core.info(`Generated base bbmodel for ${entity.identifier} at ${modelPath}`);
                 }
                 catch (error) {
-                    core.warning(`Skipping ${entity.identifier} (base shiny) due to error creating bbmodel: ${error}`);
+                    core.warning(`Skipping ${entity.identifier} (base) due to error creating bbmodel: ${error}`);
+                }
+            }
+            for (const changeInfo of entitiesNeedingBaseShiny) {
+                const entity = changeInfo.entity;
+                if ((0, blockbench_1.hasShinyTexture)(entity)) {
+                    try {
+                        const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'shiny');
+                        const modelPath = path.join(tempDir, `${entity.identifier}.base.shiny.bbmodel`);
+                        await fs.writeFile(modelPath, JSON.stringify(bbmodel, null, 2));
+                        core.info(`Generated base shiny bbmodel for ${entity.identifier} at ${modelPath}`);
+                    }
+                    catch (error) {
+                        core.warning(`Skipping ${entity.identifier} (base shiny) due to error creating bbmodel: ${error}`);
+                    }
                 }
             }
         }
+        // Build list of entities that need head (after) models
+        const entitiesNeedingHeadDefault = entitiesToRender.filter(e => e.renderDefault);
+        const entitiesNeedingHeadShiny = entitiesToRender.filter(e => e.renderShiny);
         // Generate "after" models (checkout back to original HEAD SHA)
         core.info(`Checking out HEAD (${headSha}) to generate head models...`);
         await (0, git_1.checkout)(headSha);
-        for (const entity of prEntities) {
-            // Generate normal variant
+        for (const changeInfo of entitiesNeedingHeadDefault) {
+            const entity = changeInfo.entity;
             try {
                 const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'normal');
                 const modelPath = path.join(tempDir, `${entity.identifier}.head.bbmodel`);
@@ -128300,7 +128635,9 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             catch (error) {
                 core.warning(`Skipping ${entity.identifier} (head) due to error creating bbmodel: ${error}`);
             }
-            // Generate shiny variant if available
+        }
+        for (const changeInfo of entitiesNeedingHeadShiny) {
+            const entity = changeInfo.entity;
             if ((0, blockbench_1.hasShinyTexture)(entity)) {
                 try {
                     const bbmodel = await (0, blockbench_1.createBBFile)(entity, resourcePackPath, 'shiny');
@@ -128342,10 +128679,11 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
         // List files in temp dir for debugging
         const listAfter = await fs.readdir(tempDir);
         core.info(`Temp dir contents after render: ${JSON.stringify(listAfter)}`);
-        // Render animation GIFs for changed animations
-        const animationUrls = await renderChangedAnimations(prEntities, resourcePackPath, tempDir, browser);
+        // Render animation GIFs for changed animations (only specific ones)
+        const animationUrls = await renderSpecificAnimations(entitiesToRender, resourcePackPath, tempDir, browser);
         // Build hasShiny map for state tracking
         const hasShinyMap = new Map();
+        const prEntities = entitiesToRender.map(e => e.entity);
         for (const entity of prEntities) {
             hasShinyMap.set(entity.identifier, (0, blockbench_1.hasShinyTexture)(entity));
         }
@@ -128373,43 +128711,57 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
             core.info('Fork PR detected - images uploaded as artifact');
             core.info(`Artifact contains metadata for workflow_run to post comment`);
         }
-        // Track which entities are new (not present on base branch)
-        const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
-        const structuredUrls = prEntities.map((entity) => {
+        // Build structured URLs for entities that had models rendered
+        const structuredUrls = entitiesToRender
+            .filter(changeInfo => changeInfo.renderDefault || changeInfo.renderShiny)
+            .map((changeInfo) => {
+            const entity = changeInfo.entity;
             const safeId = toSafeFilename(entity.identifier);
-            // Normal variant URLs
-            const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
-            const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
-            const safeBase = path.join(tempDir, `${safeId}.base.png`);
-            const safeHead = path.join(tempDir, `${safeId}.head.png`);
-            const baseUrl = publicUrls[originalBase] || publicUrls[safeBase] || '';
-            const headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
-            // Shiny variant URLs
-            const originalBaseShiny = path.join(tempDir, `${entity.identifier}.base.shiny.png`);
-            const originalHeadShiny = path.join(tempDir, `${entity.identifier}.head.shiny.png`);
-            const safeBaseShiny = path.join(tempDir, `${safeId}.base.shiny.png`);
-            const safeHeadShiny = path.join(tempDir, `${safeId}.head.shiny.png`);
-            const baseShinyUrl = publicUrls[originalBaseShiny] || publicUrls[safeBaseShiny] || '';
-            const headShinyUrl = publicUrls[originalHeadShiny] || publicUrls[safeHeadShiny] || '';
-            const isNew = !baseEntityIds.has(entity.identifier);
+            // Normal variant URLs (only if renderDefault is true)
+            let baseUrl = '';
+            let headUrl = '';
+            if (changeInfo.renderDefault) {
+                const originalBase = path.join(tempDir, `${entity.identifier}.base.png`);
+                const originalHead = path.join(tempDir, `${entity.identifier}.head.png`);
+                const safeBase = path.join(tempDir, `${safeId}.base.png`);
+                const safeHead = path.join(tempDir, `${safeId}.head.png`);
+                baseUrl = changeInfo.isNew ? '' : (publicUrls[originalBase] || publicUrls[safeBase] || '');
+                headUrl = publicUrls[originalHead] || publicUrls[safeHead] || '';
+            }
+            // Shiny variant URLs (only if renderShiny is true)
+            let baseShinyUrl = '';
+            let headShinyUrl = '';
+            if (changeInfo.renderShiny) {
+                const originalBaseShiny = path.join(tempDir, `${entity.identifier}.base.shiny.png`);
+                const originalHeadShiny = path.join(tempDir, `${entity.identifier}.head.shiny.png`);
+                const safeBaseShiny = path.join(tempDir, `${safeId}.base.shiny.png`);
+                const safeHeadShiny = path.join(tempDir, `${safeId}.head.shiny.png`);
+                baseShinyUrl = changeInfo.isNew ? '' : (publicUrls[originalBaseShiny] || publicUrls[safeBaseShiny] || '');
+                headShinyUrl = publicUrls[originalHeadShiny] || publicUrls[safeHeadShiny] || '';
+            }
             const entityHasShiny = (0, blockbench_1.hasShinyTexture)(entity);
-            core.info(`URL mapping for ${entity.identifier}: isNew=${isNew}, hasShiny=${entityHasShiny}, ` +
-                `base => ${baseUrl || '[missing]'}, head => ${headUrl || '[missing]'}, ` +
-                `baseShiny => ${baseShinyUrl || '[missing]'}, headShiny => ${headShinyUrl || '[missing]'}`);
+            core.info(`URL mapping for ${entity.identifier}: isNew=${changeInfo.isNew}, hasShiny=${entityHasShiny}, ` +
+                `renderDefault=${changeInfo.renderDefault}, renderShiny=${changeInfo.renderShiny}, ` +
+                `base => ${baseUrl || '[not rendered]'}, head => ${headUrl || '[not rendered]'}, ` +
+                `baseShiny => ${baseShinyUrl || '[not rendered]'}, headShiny => ${headShinyUrl || '[not rendered]'}`);
             return {
                 identifier: entity.identifier,
                 base: baseUrl,
                 head: headUrl,
                 baseShiny: baseShinyUrl,
                 headShiny: headShinyUrl,
-                isNew,
+                isNew: changeInfo.isNew,
                 hasShiny: entityHasShiny,
+                // Additional info for granular comments
+                renderDefault: changeInfo.renderDefault,
+                renderShiny: changeInfo.renderShiny,
             };
         });
-        // Filter out rows where both normal images are missing (unless fork PR)
+        // Filter out rows where nothing was rendered (unless fork PR)
         const nonEmptyRows = uploadResult.isFork
             ? structuredUrls // Keep all for fork PRs to list affected entities
-            : structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0));
+            : structuredUrls.filter((u) => (u.base && u.base.length > 0) || (u.head && u.head.length > 0) ||
+                (u.baseShiny && u.baseShiny.length > 0) || (u.headShiny && u.headShiny.length > 0));
         // Build animation URL sets from rendered GIFs
         core.info(`Looking for animation GIF URLs. Available keys: ${Object.keys(publicUrls).join(', ')}`);
         const animationUrlSets = animationUrls.map((anim) => {
@@ -128439,7 +128791,65 @@ async function renderChanges(baseEntities, prEntities, resourcePackPath, baseRef
     }
 }
 /**
- * Render GIFs for changed animations
+ * Render GIFs for specific animations based on EntityChangeInfo
+ * Only renders the animations specified in animationsToRender for each entity
+ */
+async function renderSpecificAnimations(entitiesToRender, resourcePackPath, tempDir, browser) {
+    const renderedAnimations = [];
+    // Filter to only entities that have animations to render
+    const entitiesWithAnimations = entitiesToRender.filter(e => e.animationsToRender.length > 0);
+    if (entitiesWithAnimations.length === 0) {
+        core.info('No animations to render');
+        return renderedAnimations;
+    }
+    core.info(`Rendering animations for ${entitiesWithAnimations.length} entities`);
+    for (const changeInfo of entitiesWithAnimations) {
+        const entity = changeInfo.entity;
+        const animationsToRender = new Set(changeInfo.animationsToRender);
+        core.info(`Entity ${entity.identifier} - rendering ${animationsToRender.size} animation(s): ${[...animationsToRender].join(', ')}`);
+        // Build animation data map for this entity
+        const animationDataMap = new Map();
+        for (const animFile of entity.animationFiles) {
+            try {
+                const animPath = path.join(resourcePackPath, animFile);
+                const content = await fs.readFile(animPath, 'utf-8');
+                const animFileData = JSON.parse(content);
+                if (animFileData.animations) {
+                    for (const [animId, animData] of Object.entries(animFileData.animations)) {
+                        animationDataMap.set(animId, animData);
+                    }
+                }
+            }
+            catch (error) {
+                core.warning(`Failed to parse animation file ${animFile}: ${error}`);
+            }
+        }
+        // Render only the specified animations
+        for (const animId of animationsToRender) {
+            const animData = animationDataMap.get(animId);
+            if (!animData) {
+                core.warning(`Animation ${animId} not found in entity ${entity.identifier}'s animation files`);
+                continue;
+            }
+            core.info(`Rendering animation ${animId} for ${entity.identifier}`);
+            try {
+                const result = await renderAnimationGif(entity, animId, animData, resourcePackPath, tempDir, browser);
+                if (result) {
+                    result.isNew = changeInfo.isNew;
+                    renderedAnimations.push(result);
+                }
+            }
+            catch (error) {
+                core.warning(`Failed to render animation ${animId}: ${error}`);
+            }
+        }
+    }
+    core.info(`Rendered ${renderedAnimations.length} animation GIF(s) total`);
+    return renderedAnimations;
+}
+/**
+ * @deprecated Use renderSpecificAnimations instead
+ * Render GIFs for all animations of entities (legacy function)
  */
 async function renderChangedAnimations(entities, resourcePackPath, tempDir, browser) {
     const renderedAnimations = [];

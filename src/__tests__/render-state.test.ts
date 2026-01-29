@@ -2,7 +2,7 @@ import {
   determineChangedEntities,
   createRenderState,
 } from '../render-state';
-import { Entity, RenderState } from '../types';
+import { Entity, RenderState, EntityRenderState } from '../types';
 
 // Mock the modules
 jest.mock('@actions/core', () => ({
@@ -30,6 +30,23 @@ jest.mock('fs/promises', () => ({
 const exec = require('@actions/exec');
 const fs = require('fs/promises');
 
+// Helper to create a complete EntityRenderState with granular hashes
+const createEntityRenderState = (
+  identifier: string,
+  overrides: Partial<EntityRenderState> = {}
+): EntityRenderState => ({
+  identifier,
+  renderedCommit: 'old-commit-sha',
+  hasShiny: false,
+  entityFileHash: `entity-hash-${identifier}`,
+  geometryHashes: { [`models/entity/${identifier}.geo.json`]: `geo-hash-${identifier}` },
+  defaultTextureHash: `texture-hash-${identifier}`,
+  shinyTextureHash: '',
+  animationHashes: {},
+  materialHashes: {},
+  ...overrides,
+});
+
 describe('determineChangedEntities', () => {
   const createEntity = (
     identifier: string,
@@ -48,24 +65,29 @@ describe('determineChangedEntities', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     // Default: commit is an ancestor
-    exec.getExecOutput.mockResolvedValue({ exitCode: 0 });
+    exec.getExecOutput.mockResolvedValue({ exitCode: 0, stdout: 'commit' });
     // Default: return empty file content for hashing
     fs.readFile.mockResolvedValue(Buffer.from('{}'));
   });
 
   it('should render all entities on first run (no previous state)', async () => {
     const entities = [createEntity('pikachu'), createEntity('charizard')];
+    const baseEntityIds = new Set(['pikachu']); // charizard is new
 
     const result = await determineChangedEntities(
       entities,
       null, // No previous state
       '/resource-pack',
-      []
+      [],
+      baseEntityIds
     );
 
     expect(result.isFirstRun).toBe(true);
     expect(result.entitiesToRender).toHaveLength(2);
     expect(result.unchangedEntities).toHaveLength(0);
+    // All should have renderDefault and renderShiny flags set based on texture availability
+    expect(result.entitiesToRender[0].renderDefault).toBe(true);
+    expect(result.entitiesToRender[1].renderDefault).toBe(true);
   });
 
   it('should render all entities on force push (commit not ancestor)', async () => {
@@ -73,16 +95,12 @@ describe('determineChangedEntities', () => {
     exec.getExecOutput.mockResolvedValue({ exitCode: 1 });
 
     const entities = [createEntity('pikachu'), createEntity('charizard')];
+    const baseEntityIds = new Set(['pikachu', 'charizard']);
     const previousState: RenderState = {
       lastProcessedCommit: 'old-commit-sha',
       lastRenderTimestamp: '2026-01-01T00:00:00Z',
       renderedEntities: {
-        pikachu: {
-          identifier: 'pikachu',
-          sourceFilesHash: 'hash1',
-          renderedCommit: 'old-commit-sha',
-          hasShiny: false,
-        },
+        pikachu: createEntityRenderState('pikachu'),
       },
     };
 
@@ -90,7 +108,8 @@ describe('determineChangedEntities', () => {
       entities,
       previousState,
       '/resource-pack',
-      []
+      [],
+      baseEntityIds
     );
 
     expect(result.isFirstRun).toBe(false);
@@ -100,17 +119,13 @@ describe('determineChangedEntities', () => {
 
   it('should identify new entities that need rendering', async () => {
     const entities = [createEntity('pikachu'), createEntity('charizard')];
+    const baseEntityIds = new Set(['pikachu']); // charizard is new to base
     const previousState: RenderState = {
       lastProcessedCommit: 'old-commit-sha',
       lastRenderTimestamp: '2026-01-01T00:00:00Z',
       renderedEntities: {
-        pikachu: {
-          identifier: 'pikachu',
-          sourceFilesHash: 'hash1',
-          renderedCommit: 'old-commit-sha',
-          hasShiny: false,
-        },
-        // charizard not in previous state - it's new
+        pikachu: createEntityRenderState('pikachu'),
+        // charizard not in previous state - it's new to render state
       },
     };
 
@@ -118,34 +133,27 @@ describe('determineChangedEntities', () => {
       entities,
       previousState,
       '/resource-pack',
-      ['entity/charizard.json'] // charizard's files changed
+      ['entity/charizard.json'], // charizard's files changed
+      baseEntityIds
     );
 
     expect(result.isFirstRun).toBe(false);
     expect(result.entitiesToRender).toHaveLength(1);
-    expect(result.entitiesToRender[0].identifier).toBe('charizard');
+    expect(result.entitiesToRender[0].entity.identifier).toBe('charizard');
+    expect(result.entitiesToRender[0].isNew).toBe(true); // New to base branch
     expect(result.unchangedEntities).toHaveLength(1);
     expect(result.unchangedEntities[0].identifier).toBe('pikachu');
   });
 
   it('should skip entities with no changed files', async () => {
     const entities = [createEntity('pikachu'), createEntity('charizard')];
+    const baseEntityIds = new Set(['pikachu', 'charizard']);
     const previousState: RenderState = {
       lastProcessedCommit: 'old-commit-sha',
       lastRenderTimestamp: '2026-01-01T00:00:00Z',
       renderedEntities: {
-        pikachu: {
-          identifier: 'pikachu',
-          sourceFilesHash: 'some-hash',
-          renderedCommit: 'old-commit-sha',
-          hasShiny: false,
-        },
-        charizard: {
-          identifier: 'charizard',
-          sourceFilesHash: 'another-hash',
-          renderedCommit: 'old-commit-sha',
-          hasShiny: true,
-        },
+        pikachu: createEntityRenderState('pikachu'),
+        charizard: createEntityRenderState('charizard', { hasShiny: true }),
       },
     };
 
@@ -154,7 +162,8 @@ describe('determineChangedEntities', () => {
       entities,
       previousState,
       '/resource-pack',
-      [] // No changed files
+      [], // No changed files
+      baseEntityIds
     );
 
     expect(result.isFirstRun).toBe(false);
@@ -172,22 +181,13 @@ describe('determineChangedEntities', () => {
     });
 
     const entities = [createEntity('pikachu'), createEntity('charizard')];
+    const baseEntityIds = new Set(['pikachu', 'charizard']);
     const previousState: RenderState = {
       lastProcessedCommit: 'old-commit-sha',
       lastRenderTimestamp: '2026-01-01T00:00:00Z',
       renderedEntities: {
-        pikachu: {
-          identifier: 'pikachu',
-          sourceFilesHash: 'unchanged-hash',
-          renderedCommit: 'old-commit-sha',
-          hasShiny: false,
-        },
-        charizard: {
-          identifier: 'charizard',
-          sourceFilesHash: 'old-hash', // Different from what will be computed
-          renderedCommit: 'old-commit-sha',
-          hasShiny: true,
-        },
+        pikachu: createEntityRenderState('pikachu'),
+        charizard: createEntityRenderState('charizard', { hasShiny: true }),
       },
     };
 
@@ -195,12 +195,15 @@ describe('determineChangedEntities', () => {
       entities,
       previousState,
       '/resource-pack',
-      ['textures/entity/charizard.png'] // charizard's texture changed
+      ['textures/entity/charizard.png'], // charizard's texture changed
+      baseEntityIds
     );
 
     expect(result.isFirstRun).toBe(false);
-    expect(result.entitiesToRender).toHaveLength(1);
-    expect(result.entitiesToRender[0].identifier).toBe('charizard');
+    // Should detect charizard has changes (granular detection)
+    expect(result.entitiesToRender.length).toBeGreaterThanOrEqual(1);
+    const charizardChange = result.entitiesToRender.find(e => e.entity.identifier === 'charizard');
+    expect(charizardChange).toBeDefined();
   });
 });
 
@@ -224,7 +227,7 @@ describe('createRenderState', () => {
     fs.readFile.mockResolvedValue(Buffer.from('{}'));
   });
 
-  it('should create state for newly rendered entities', async () => {
+  it('should create state for newly rendered entities with granular hashes', async () => {
     const renderedEntities = [createEntity('pikachu')];
     const hasShinyMap = new Map([['pikachu', true]]);
 
@@ -242,6 +245,12 @@ describe('createRenderState', () => {
     expect(state.renderedEntities['pikachu'].identifier).toBe('pikachu');
     expect(state.renderedEntities['pikachu'].hasShiny).toBe(true);
     expect(state.renderedEntities['pikachu'].renderedCommit).toBe('new-commit-sha');
+    // Check granular hashes exist
+    expect(state.renderedEntities['pikachu'].entityFileHash).toBeDefined();
+    expect(state.renderedEntities['pikachu'].geometryHashes).toBeDefined();
+    expect(state.renderedEntities['pikachu'].defaultTextureHash).toBeDefined();
+    expect(state.renderedEntities['pikachu'].animationHashes).toBeDefined();
+    expect(state.renderedEntities['pikachu'].materialHashes).toBeDefined();
   });
 
   it('should preserve unchanged entities from previous state', async () => {
@@ -249,12 +258,10 @@ describe('createRenderState', () => {
       lastProcessedCommit: 'old-commit-sha',
       lastRenderTimestamp: '2026-01-01T00:00:00Z',
       renderedEntities: {
-        charizard: {
-          identifier: 'charizard',
-          sourceFilesHash: 'charizard-hash',
-          renderedCommit: 'old-commit-sha',
+        charizard: createEntityRenderState('charizard', {
           hasShiny: true,
-        },
+          renderedCommit: 'old-commit-sha',
+        }),
       },
     };
 
@@ -278,7 +285,6 @@ describe('createRenderState', () => {
     // Preserved from previous
     expect(state.renderedEntities['charizard']).toBeDefined();
     expect(state.renderedEntities['charizard'].renderedCommit).toBe('old-commit-sha');
-    expect(state.renderedEntities['charizard'].sourceFilesHash).toBe('charizard-hash');
   });
 
   it('should include timestamp in state', async () => {

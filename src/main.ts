@@ -6,7 +6,7 @@ import { getChangedFiles, getChangedFilesSinceCommit, findAffectedEntities } fro
 import { checkout, getHeadSha } from './git';
 import { renderChanges } from './renderer';
 import { runPostMode } from './post-comment';
-import { Entity, RenderState } from './types';
+import { Entity, RenderState, EntityChangeInfo } from './types';
 import {
   fetchRenderState,
   determineChangedEntities,
@@ -107,24 +107,42 @@ async function run(): Promise<void> {
         .join(', ')}`
     );
 
-    // 5. Determine which entities actually need rendering (incremental)
+    // 5. Checkout base branch to get base entity list (needed for new entity detection)
+    core.info(`Checking out base branch: ${baseRef}`);
+    await checkout(baseRef);
+    const baseEntities = await parseResourcePack(resourcePackPath);
+    const baseEntityIds = new Set(baseEntities.map(e => e.identifier));
+
+    // Checkout back to HEAD to determine changes
+    await checkout(headSha);
+
+    // 6. Determine which entities actually need rendering (granular incremental)
     const { entitiesToRender, unchangedEntities, isFirstRun } =
       await determineChangedEntities(
         allAffectedEntities,
         previousState,
         resourcePackPath,
-        changedFilesSinceLastCommit
+        changedFilesSinceLastCommit,
+        baseEntityIds
       );
 
     if (entitiesToRender.length === 0) {
       core.info('No entities changed since last render - nothing to do.');
       return;
     }
-    core.info(
-      `Will render ${entitiesToRender.length} entities: ${entitiesToRender
-        .map((e) => e.identifier)
-        .join(', ')}`
-    );
+    
+    // Log what will be rendered with granular details
+    core.info(`Will render ${entitiesToRender.length} entities with the following changes:`);
+    for (const changeInfo of entitiesToRender) {
+      const parts = [];
+      if (changeInfo.renderDefault) parts.push('default model');
+      if (changeInfo.renderShiny) parts.push('shiny model');
+      if (changeInfo.animationsToRender.length > 0) {
+        parts.push(`${changeInfo.animationsToRender.length} animation(s)`);
+      }
+      core.info(`  ${changeInfo.entity.identifier}: ${parts.join(', ')}`);
+    }
+    
     if (unchangedEntities.length > 0) {
       core.info(
         `Skipping ${unchangedEntities.length} unchanged entities: ${unchangedEntities
@@ -133,20 +151,12 @@ async function run(): Promise<void> {
       );
     }
 
-    // 6. Checkout base branch and parse
+    // 7. Checkout base branch for base model generation
     core.info(`Checking out base branch: ${baseRef}`);
     await checkout(baseRef);
-    const baseEntities = await parseResourcePack(resourcePackPath);
 
-    // Filter base entities to only include those we're rendering
-    const entitiesToRenderIds = entitiesToRender.map((e) => e.identifier);
-    const affectedBaseEntities = baseEntities.filter((e) =>
-      entitiesToRenderIds.includes(e.identifier)
-    );
-
-    // 7. Render changes - pass incremental context
+    // 8. Render changes - pass EntityChangeInfo[] with incremental context
     await renderChanges(
-      affectedBaseEntities,
       entitiesToRender,
       resourcePackPath,
       baseRef,
