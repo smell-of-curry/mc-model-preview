@@ -14,17 +14,97 @@ const IMAGE_BRANCH = 'mc-model-preview-images';
 const STATE_FILENAME = 'render-state.json';
 
 /**
- * Fetch the existing render state for a PR from the image branch
+ * Fetch render state from a previous workflow artifact (for fork PRs)
+ * GitHub stores artifacts from workflow runs, which we can download and extract
+ */
+async function fetchRenderStateFromArtifact(prNumber: number): Promise<RenderState | null> {
+  const token = core.getInput('github-token');
+  const octokit = github.getOctokit(token);
+  const artifactName = `model-preview-pr-${prNumber}`;
+  
+  try {
+    // List artifacts for this repo matching our naming pattern
+    const { data: { artifacts } } = await octokit.rest.actions.listArtifactsForRepo({
+      owner: github.context.repo.owner,
+      repo: github.context.repo.repo,
+      name: artifactName,
+      per_page: 10, // Get recent artifacts
+    });
+    
+    if (artifacts.length === 0) {
+      core.info(`No previous artifact found for PR #${prNumber}`);
+      return null;
+    }
+    
+    // Find the most recent non-expired artifact
+    const latestArtifact = artifacts.find(a => !a.expired);
+    if (!latestArtifact) {
+      core.info(`All artifacts for PR #${prNumber} have expired`);
+      return null;
+    }
+    
+    core.info(`Found artifact: ${latestArtifact.name} (ID: ${latestArtifact.id}, created: ${latestArtifact.created_at})`);
+    
+    // Download the artifact (returns ArrayBuffer)
+    const { data } = await octokit.rest.actions.downloadArtifact({
+      owner: github.context.repo.owner,
+      repo: github.context.repo.repo,
+      artifact_id: latestArtifact.id,
+      archive_format: 'zip',
+    });
+    
+    // Save the zip to a temp directory
+    const tempDir = path.join(process.cwd(), 'temp-artifact-download');
+    await fs.mkdir(tempDir, { recursive: true });
+    const zipPath = path.join(tempDir, 'artifact.zip');
+    await fs.writeFile(zipPath, Buffer.from(data as ArrayBuffer));
+    
+    // Extract render-state.json from the zip
+    const extractResult = await exec.getExecOutput('unzip', ['-o', zipPath, STATE_FILENAME, '-d', tempDir], {
+      ignoreReturnCode: true,
+      silent: true,
+    });
+    
+    if (extractResult.exitCode !== 0) {
+      core.info(`Artifact does not contain ${STATE_FILENAME} (older format)`);
+      await fs.rm(tempDir, { recursive: true, force: true });
+      return null;
+    }
+    
+    // Read the extracted file
+    const statePath = path.join(tempDir, STATE_FILENAME);
+    const content = await fs.readFile(statePath, 'utf-8');
+    const state = JSON.parse(content) as RenderState;
+    
+    // Cleanup
+    await fs.rm(tempDir, { recursive: true, force: true });
+    
+    core.info(`Fetched render state from artifact ${artifactName}`);
+    core.info(`Last processed commit: ${state.lastProcessedCommit}`);
+    core.info(`Previously rendered entities: ${Object.keys(state.renderedEntities).length}`);
+    
+    return state;
+  } catch (error: any) {
+    core.warning(`Failed to fetch render state from artifact: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch the existing render state for a PR
+ * Tries multiple sources in order:
+ * 1. Git branch (for non-fork PRs)
+ * 2. Workflow artifacts (for fork PRs)
  * Returns null if no state exists (first run)
  */
 export async function fetchRenderState(prNumber: number): Promise<RenderState | null> {
-  const repo = `${github.context.repo.owner}/${github.context.repo.repo}`;
   const token = core.getInput('github-token');
   const octokit = github.getOctokit(token);
   
   const prFolder = `pr-${prNumber}`;
   const statePath = `${prFolder}/${STATE_FILENAME}`;
   
+  // First, try to fetch from Git branch (works for non-fork PRs)
   try {
     const { data } = await octokit.rest.repos.getContent({
       owner: github.context.repo.owner,
@@ -43,12 +123,19 @@ export async function fetchRenderState(prNumber: number): Promise<RenderState | 
     }
   } catch (error: any) {
     if (error.status === 404) {
-      core.info(`No existing render state found for PR #${prNumber} (first run)`);
-      return null;
+      core.info(`No render state on branch for PR #${prNumber}, checking artifacts...`);
+    } else {
+      core.warning(`Failed to fetch render state from branch: ${error.message}`);
     }
-    core.warning(`Failed to fetch render state: ${error.message}`);
   }
   
+  // If branch fetch fails, try fetching from artifact (for fork PRs)
+  const artifactState = await fetchRenderStateFromArtifact(prNumber);
+  if (artifactState) {
+    return artifactState;
+  }
+  
+  core.info(`No existing render state found for PR #${prNumber} (first run)`);
   return null;
 }
 
